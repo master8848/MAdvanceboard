@@ -126,12 +126,6 @@ class KbInputMethodService : InputMethodService() {
      */
     internal val snippetBuffer = SnippetBuffer()
 
-    /** Live pad layout id; read by [ImeScreen]'s toggle, written by [setPadLayout]. */
-    private var liveLayoutId by mutableStateOf(DEFAULT_LAYOUT_ID)
-
-    /** Live tab label for [ImeScreen]'s per-tab pad caption. */
-    private var liveTabLabel by mutableStateOf("words")
-
     /**
      * Live tab strip: built-ins + enabled custom categories
      * ([CustomPackStore]), `★personal` pinned last. Disabled customs are
@@ -239,8 +233,6 @@ class KbInputMethodService : InputMethodService() {
         // Restore the user's persisted layout (per-tab resolve; the
         // default tab is `words`) before first inflate.
         activeLayoutId = LayoutStore.layoutForCat(this, activeAssetId)
-        liveLayoutId = activeLayoutId
-        liveTabLabel = activeAssetId
         activeSpec = loadLayoutSpec(this, activeLayoutId)
         reloadGesturePrefs()
         flingsAllowedAT = AccessibilityGates.evaluate(this).flingsAllowed
@@ -456,9 +448,7 @@ class KbInputMethodService : InputMethodService() {
                     onPlacementMoveDown = { onPlacementMove(1) },
                     onPlacementToggle = { onPlacementToggle() },
                     onPlacementDismiss = { onPlacementDismiss() },
-                    activeLayoutId = liveLayoutId,
-                    activeTabLabel = liveTabLabel,
-                    onLayoutChanged = { setTabLayout(it) },
+                    onOpenSettings = { openLayoutSettings() },
                     symbolsOptions = symbolsOptions,
                     symbolsTitle = symbolsTitle,
                     onSymbolPick = { onSymbolPick(it) },
@@ -847,21 +837,40 @@ class KbInputMethodService : InputMethodService() {
     internal fun setPadLayout(layoutId: String) {
         if (layoutId !in SUPPORTED_LAYOUT_IDS) return
         activeLayoutId = layoutId
-        liveLayoutId = layoutId
         activeSpec = loadLayoutSpec(this, layoutId)
         seq.clear()
         (cachedInputView as? LinearLayout)?.let { refreshPad(it) }
     }
 
     /**
-     * Pad-size toggle target: persists [layoutId] as the per-tab override
-     * for the current tab ([LayoutStore.setCatLayout] throws loudly on
-     * unknown ids) and swaps the pad. The global default is owned by
-     * Settings → Layout; per-tab picks win over it (plan/02).
+     * Persisted layout-override path (kept working after the pad toggle
+     * moved to Settings → Layout): persists [layoutId] as the per-tab
+     * override for the current tab ([LayoutStore.setCatLayout] throws
+     * loudly on unknown ids) and swaps the pad. Reachable on-device via
+     * the `#`/`mode` pad key ([cyclePadLayout]) and via Settings → Layout;
+     * the global default is owned by Settings → Layout and per-tab picks
+     * win over it (plan/02).
      */
     internal fun setTabLayout(layoutId: String) {
         LayoutStore.setCatLayout(this, activeAssetId, layoutId)
         setPadLayout(layoutId)
+    }
+
+    /**
+     * ⚙ deep-link: opens Settings (Layout section owns global + per-tab).
+     * String-based component (no `:ime` → `:app` compile dep — both ship in
+     * the `com.kb.app` APK, so [packageName] is the host package). Failures
+     * surface on the status line, never a dead key.
+     */
+    internal fun openLayoutSettings() {
+        try {
+            val intent = android.content.Intent()
+                .setClassName(packageName, "com.kb.app.SettingsActivity")
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        } catch (e: Exception) {
+            reportGestureError("Could not open Settings: ${e.message}")
+        }
     }
 
     /**
@@ -1652,7 +1661,6 @@ class KbInputMethodService : InputMethodService() {
 
     internal fun onCategoryChanged(tabLabel: String) {
         activeAssetId = canonicalTabId(tabLabel)
-        liveTabLabel = activeAssetId
         // Snippet buffer dies on tab switch (plan 12:62): helpers belong to
         // one tab's document scratch — switching to General hides the js strip,
         // and coming back later finds it gone. The new tab's static palette

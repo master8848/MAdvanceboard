@@ -50,13 +50,18 @@ data class PlacementState(
 
 /**
  * Hybrid IME screen: [CategoryTabs] + [SuggestionStrip] + expand-all paged
- * sheet + QWERTY FAB toggle + 9/12/16 pad-size toggle + plan 01 overlays.
+ * sheet + QWERTY FAB toggle + plan 01 overlays.
  *
  * [candidates] are live results fed by the host service from
  * Predictor.suggest (shared T9/QWERTY path) — never hardcoded here.
- * [activeLayoutId] reflects the service's pad; [onLayoutChanged] persists
- * the pick as the per-tab override ([LayoutStore]) and swaps the pad.
- * [activeTabLabel] names the tab the toggle applies to.
+ *
+ * Zero layout chrome by design (UX): the 9/12/16 pad-size toggle lives ONLY
+ * in Settings → Layout (global default + per-tab overrides via
+ * [LayoutStore]); the pad offers no layout switcher. [onOpenSettings]
+ * deep-links there (⚙ key in the strip row) so a layout change is one tap
+ * away without cluttering the pad. The persisted override path itself
+ * ([LayoutStore.setCatLayout], applied by the host on tab switch / field
+ * start) is untouched by this screen.
  *
  * Plan 01 additions (all optional params, all duplicated by visible UI):
  * - [symbolsOptions]/[onSymbolPick]/[onSymbolsDismiss]: long-press symbols
@@ -79,6 +84,8 @@ fun ImeScreen(
     onExpandAll: () -> Unit = {},
     onToggleQwerty: () -> Unit = {},
     onCategoryChanged: (String) -> Unit = {},
+    /** ⚙ key: host deep-links to Settings → Layout (zero layout chrome on the pad). */
+    onOpenSettings: () -> Unit = {},
     /** Long-press on a tab: host opens the [PlacementState] popup. */
     onTabLongPress: (String) -> Unit = {},
     /** Placement popup (null = hidden) + its actions. */
@@ -87,10 +94,6 @@ fun ImeScreen(
     onPlacementMoveDown: () -> Unit = {},
     onPlacementToggle: () -> Unit = {},
     onPlacementDismiss: () -> Unit = {},
-    activeLayoutId: String = "t9-9",
-    onLayoutChanged: (String) -> Unit = {},
-    /** Tab the pad-size toggle applies to (per-tab override caption). */
-    activeTabLabel: String = "words",
     symbolsOptions: List<String> = emptyList(),
     symbolsTitle: String = "",
     onSymbolPick: (String) -> Unit = {},
@@ -196,6 +199,11 @@ fun ImeScreen(
                     Text(if (clipboardVisible) "[📋]" else "📋")
                 }
             }
+            // Layout lives in Settings → Layout (global + per-tab); the pad
+            // keeps zero layout chrome, so this gear is the only path.
+            TextButton(onClick = onOpenSettings) {
+                Text("⚙")
+            }
         }
         if (clipboardVisible && !incognito) {
             ClipboardPanel(
@@ -235,14 +243,6 @@ fun ImeScreen(
                 )
             )
         }
-        // Pad-size toggle: 9/12/16 per-tab override (plan/02). Switching
-        // tabs re-resolves the engine + pad via the host; labels come
-        // from the newly loaded spec.
-        PadSizeToggle(
-            activeLayoutId = activeLayoutId,
-            activeTabLabel = activeTabLabel,
-            onSelect = onLayoutChanged
-        )
         if (statusLine != null) {
             Text(
                 text = statusLine,
@@ -551,35 +551,6 @@ fun ExpandAllList(
                         .padding(horizontal = 16.dp, vertical = 12.dp)
                 )
             }
-        }
-    }
-}
-
-/**
- * 9/12/16 pad-size toggle. Selected id renders bracketed (`[12]`);
- * selection flows to the host, which persists it as the per-tab override
- * ([LayoutStore]) and swaps the PadView. The caption names the owning tab
- * so the per-tab scope is visible. Category tabs and the QWERTY toggle
- * are unaffected.
- */
-@Composable
-fun PadSizeToggle(
-    activeLayoutId: String,
-    onSelect: (String) -> Unit,
-    modifier: Modifier = Modifier,
-    activeTabLabel: String = ""
-) {
-    // Short labels derive from the canonical ids (single source of truth in
-    // SUPPORTED_LAYOUT_IDS) so a new pad size appears here automatically.
-    val options = SUPPORTED_LAYOUT_IDS.map { it to it.removePrefix("t9-") }
-    Row(modifier = modifier.fillMaxWidth()) {
-        Text(
-            text = if (activeTabLabel.isEmpty()) "Pad:" else "Pad ($activeTabLabel):",
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
-        )
-        options.forEach { (id, short) ->
-            val label = if (id == activeLayoutId) "[$short]" else short
-            TextButton(onClick = { onSelect(id) }) { Text(label) }
         }
     }
 }
