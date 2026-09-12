@@ -1,4 +1,4 @@
-# kbcore — 9-key T9 predictive text engine (Rust)
+# kbcore — configurable predictive text engine (Rust, 9-key T9 default)
 
 Lean, Android-free core: T9 mapping, FST-backed dictionary stack,
 frequency ranking, personal overlay, session logging, extension packs,
@@ -12,7 +12,7 @@ core-rust/
   build.rs            # uniffi::generate_scaffolding("src/kbcore.udl")
   src/
     lib.rs            # module wiring
-    mapping.rs        # 9-key encode, Devanagari collapse, adjacency/1-edit
+    mapping.rs        # layout-driven encode (t9-9 default), Devanagari collapse, adjacency/1-edit
     stack.rs          # DictionaryStack { base + extensions + personal } + fst index
     rank.rs           # ranking formula + weights
     personal.rs       # personal dict (counts, last_seen, LFU 10k, redb)

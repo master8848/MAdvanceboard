@@ -1,8 +1,10 @@
-# 9-Key Predictive Keyboard (`kb9`)
+# Configurable Predictive Keyboard (`kb9`, 9-key default)
 
-Research keyboard: 9-key T9 pad (3×3) with a shared prediction engine,
-category-filtered dictionaries, QWERTY fallback that teaches the personal
-dict, and open sideloadable vocab packs. See `SPEC.md` (normative),
+Research keyboard: configurable pad (9-key T9 3×3 default, 12/16/QWERTY per
+category) with a shared prediction engine, category-filtered dictionaries,
+QWERTY fallback that teaches the personal dict, and open sideloadable vocab
+packs. 9-key is the research direction, not the only board — the active
+board resolves from config per category. See `SPEC.md` (normative),
 `docs/INTENT.md` (research framing), `docs/USER.md` (behavior).
 
 How it works in one paragraph: each keypress emits a digit `2–9`; the
@@ -16,7 +18,9 @@ only the key→sequence encoder changes (`SPEC.md` §0).
 ## What / Why / How
 
 - **What:** MAdvanceboard is an open-source Android keyboard like Gboard:
-  9-key T9 pad + prediction engine + QWERTY fallback.
+  configurable pad (9-key default) + prediction engine + category tabs +
+  QWERTY fallback. Symbol / second-symbol / numbers paths live in category
+  tabs + gestures, not QWERTY mode mazes.
 - **Why:** research keyboard exploring fast typing on few keys with
   on-device prediction, fully offline.
 - **How:** Rust core engine (`core-rust/`, crate `kbcore`) + Kotlin IME
@@ -121,7 +125,7 @@ under `android/app/build/outputs/apk/debug/` and
 
 ## License
 
-MAdvanceboard — 9-key predictive keyboard (just like Gboard).
+MAdvanceboard — configurable predictive keyboard, 9-key default (just like Gboard).
 Copyright (C) 2026 Saurav Sanjel.
 
 Licensed under **GPL-3.0-only** — see [`LICENSE`](LICENSE). No warranty.

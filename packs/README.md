@@ -5,8 +5,8 @@ Format per file: `{id, title, version, words[]}` where each word is
 `{w, freq?, cat?, lang?, seq?}`. Load with `pack::load_pack(path)` in
 `core-rust`, then `stack.add_pack(&pack, priority)`. `seq` is an explicit
 digit-sequence override for display words that are not encodable Latin text
-(emoji, LaTeX); all other words encode via the 9-key map
-(`mapping::encode_word`).
+(emoji, LaTeX); all other words encode via the active layout map
+(`mapping::encode_word`, t9-9 default).
 
 ## Pack table
 

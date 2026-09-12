@@ -16,6 +16,8 @@ Source: 5 research tracks (encoding gate, gesture-as-action, Nepali transliterat
 - **Gates split:** `12-snippet-vs-learn-gates.md` — snippet exempt (`tab != numbers`, 2-min RAM, delete-after-expand); learn stays `privacy.learn`.
 - **Temporal:** `13-temporal-contextual-suggestions.md` — Gboard/SwiftKey pattern (re-rank after prefix + separate routine row, never empty-strip push); P1 8-bucket SQLite sprinkle, P2 routine row, P3 monthly deferred.
 - **DB indexes:** `14-db-indexing.md` — today only PKs, zero secondary; index set lands after `06` single-handle.
+- **Voice:** `15-voice-typing.md` — system engine default (Gboard parity), optional API engine, no re-speak via bounded RAM buffer cleared on close.
+- **Docs:** `16-docs-refresh.md` — living-docs wording task: configurable board (9 default, 12/16/QWERTY per category), categories + gestures replace QWERTY mode mazes.
 
 ## Rules across all tiers
 

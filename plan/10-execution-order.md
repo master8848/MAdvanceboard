@@ -22,6 +22,8 @@ User compiles later. Plan only, in this sequence. Each step = its file. Gate blo
 
 8. `07-code-math-palettes.md` — keep Tier-0 vocab for all tabs; add Tier-1 palette behind `CategoryProvider` for `js/rust/html/math` only (symbols, snippets `$1/$0`, matrix navigation). `words/ne/emoji/numbers/medical` stay pure.
 9. `08-dict-stack-ordering.md` — drag-drop 10-90 UI, enable/layout/learn badges, placement popup, order round-trips export. Depends on 07 priority-vs-availability rule.
+10. `15-voice-typing.md` — mic action, system-engine default + optional API, bounded 90 s RAM buffer, no re-speak retry. After Tier-2 (needs `06` lifecycle + `11` gates).
+11. `16-docs-refresh.md` — living-docs wording: configurable board + categories/gestures framing. Anytime after Tier-0, land before release.
 
 ## Tier-4 — Spikes (any time after Tier-0, time-boxed)
 
