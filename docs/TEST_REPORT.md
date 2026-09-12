@@ -71,3 +71,19 @@ Not changed (needs owner, out of docs scope or non-trivial):
 - Tombstone `del` vs `deleted` (§4 row 8) — SPEC + android README must converge first.
 - `en-base`/`ne-base` showcase names vs disk ids `en`/`ne`; EN/NE case drift; `words` vs `en` — pack-manifest ownership.
 - No rewrites performed.
+
+## 6. Addendum (2026-09-12, code-quality pass) — §4 rows 7–9 now stale
+
+Verified against the current tree; the report-time claims below no longer hold:
+
+- Row 7 (`redb`): core persistence is `rusqlite` (bundled) — `docs/PRIVACY.md`
+  L36–39, `docs/ENGINEERING.md` §§1–3, `core-rust/Cargo.toml` (`rusqlite 0.40`).
+  `core-rust/README.md` still carries `redb` lines (L18, §§Storage
+  choice/migration) — owned by the core track, out of scope here.
+- Row 8 (tombstone contradiction): `android/README.md` L48 now uses
+  `del: true` on the wire with legacy `deleted` accepted — converged with
+  `docs/` (SPEC §4 vs §5 self-inconsistency remains, compat readers on both
+  sides: core `serde(alias)`, Android `SyncMerge.fromJsonl`).
+- Row 9 (UniFFI version): `core-rust/README.md` L11 now claims uniffi 0.32
+  (build feature), matching the vendored `uniffi-bindgen 0.32.1` bindings in
+  `android/core-bridge/.../uniffi/kbcore/kbcore.kt`.
