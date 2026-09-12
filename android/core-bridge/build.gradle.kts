@@ -27,7 +27,11 @@ dependencies {
     implementation(libs.coroutines.core)
     // JNA backs the UniFFI-generated `uniffi.kbcore` bindings (vendored
     // output of `uniffi-bindgen 0.32.1`, matching `uniffi 0.32.1` in
-    // core-rust/Cargo.toml). Load is lazy at first Predictor use.
-    implementation(libs.jna)
+    // core-rust/Cargo.toml). The `@aar` packaging is REQUIRED (not the
+    // plain jar): it carries jni/<abi>/libjnidispatch.so, without which
+    // JNA fails on-device with "libjnidispatch.so not found in resource
+    // path" (caught live on the Pixel_4 smoke). Version stays single-
+    // sourced in the catalog (`libs.versions.jna`).
+    implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
     testImplementation(libs.junit4)
 }
