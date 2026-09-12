@@ -36,6 +36,14 @@ dependencies {
     // and sync live in the :app process; the IME only needs a learn flag.
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime)
+    // Compile-scope lifecycle-runtime (ViewTreeLifecycleOwner for the
+    // ComposeView strip): the -ktx artifact does not expose it for compile.
+    implementation(libs.androidx.lifecycle.runtime.core)
+    // Owners backing ImeLifecycle (saved-state registry + view-model store
+    // for the strip's ComposeView): explicit artifacts, same versions as
+    // the rest of the androidx graph.
+    implementation(libs.androidx.lifecycle.viewmodel)
+    implementation(libs.androidx.savedstate)
     implementation(libs.coroutines.core)
     implementation(libs.coroutines.android)
 
