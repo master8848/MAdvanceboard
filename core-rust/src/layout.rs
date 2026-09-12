@@ -53,6 +53,10 @@ pub struct LayoutSpec {
     /// Precomputed char -> code map (first key wins). Rebuilt on load.
     #[serde(skip, default = "HashMap::new")]
     char_to_code: HashMap<char, char>,
+    /// Interned code set for O(1) `contains_code` (rebuilt on load; the
+    /// old linear `keys.iter().any()` scan ran per input char).
+    #[serde(skip, default = "std::collections::HashSet::new")]
+    code_set: std::collections::HashSet<char>,
 }
 
 // Raw file shapes use single-char strings so malformed JSON yields a clear
@@ -91,6 +95,12 @@ pub trait KeyMapping {
     fn layout_id(&self) -> &str;
     /// Word -> sequence under this layout (unmapped chars skipped).
     fn encode_word(&self, word: &str) -> String;
+    /// Allocation-free encode into a caller-owned buffer (overridden by
+    /// `LayoutSpec`; the default forwards through [`Self::encode_word`]).
+    fn encode_word_into(&self, word: &str, buf: &mut String) {
+        buf.clear();
+        buf.push_str(&self.encode_word(word));
+    }
     /// True if two codes are distinct neighboring keys.
     fn neighbors(&self, a: char, b: char) -> bool;
     fn key_label(&self, code: char) -> &str;
@@ -200,6 +210,7 @@ impl LayoutSpec {
                 char_to_code.entry(ch).or_insert(k.code);
             }
         }
+        let code_set = keys.iter().map(|k| k.code).collect();
         Ok(Self {
             id,
             title,
@@ -208,6 +219,7 @@ impl LayoutSpec {
             keys,
             adjacency,
             char_to_code,
+            code_set,
         })
     }
 
@@ -252,6 +264,24 @@ impl LayoutSpec {
         }
         None
     }
+
+    /// Encode `word` appending into `buf` without an intermediate `String`
+    /// allocation. Callers reuse the buffer across entries/keystrokes.
+    pub fn encode_word_into(&self, word: &str, buf: &mut String) {
+        buf.clear();
+        buf.reserve(word.len());
+        for c in word.chars() {
+            if let Some(d) = self.map_char(c) {
+                buf.push(d);
+            }
+        }
+    }
+
+    /// Buffer-reusing encode used by precompute paths.
+    pub fn encode_word_reused(&self, word: &str, buf: &mut String) -> String {
+        self.encode_word_into(word, buf);
+        buf.clone()
+    }
 }
 
 impl KeyMapping for LayoutSpec {
@@ -261,6 +291,10 @@ impl KeyMapping for LayoutSpec {
 
     fn encode_word(&self, word: &str) -> String {
         word.chars().filter_map(|c| self.map_char(c)).collect()
+    }
+
+    fn encode_word_into(&self, word: &str, buf: &mut String) {
+        LayoutSpec::encode_word_into(self, word, buf);
     }
 
     fn neighbors(&self, a: char, b: char) -> bool {
@@ -279,24 +313,60 @@ impl KeyMapping for LayoutSpec {
     }
 
     fn contains_code(&self, c: char) -> bool {
-        self.keys.iter().any(|k| k.code == c)
+        self.code_set.contains(&c)
     }
 }
 
-/// Runtime registry of layout specs. Custom layouts register from a
-/// `layouts/*.json` document; unknown ids resolve to the `t9-9` default.
-#[derive(Clone, Debug, Default)]
+/// Runtime registry of layout specs plus the global default and the
+/// per-category override map (`plan/02-layout-global-percat.md`).
+///
+/// Resolution order per keystroke: `cat_map[cat]` -> `default_id` ->
+/// [`DEFAULT_LAYOUT_ID`] (`t9-9`). Fallbacks still resolve to `t9-9` but
+/// the `_report` variants surface an explicit diagnostic string instead
+/// of failing silently; the plain `resolve`/`get_or_default` wrappers are
+/// kept for back-compat call sites that cannot surface errors.
+#[derive(Clone, Debug)]
 pub struct LayoutRegistry {
     specs: HashMap<String, LayoutSpec>,
+    default_id: String,
+    cat_map: HashMap<String, String>,
 }
+
+impl Default for LayoutRegistry {
+    fn default() -> Self {
+        Self {
+            specs: HashMap::new(),
+            default_id: DEFAULT_LAYOUT_ID.to_string(),
+            cat_map: HashMap::new(),
+        }
+    }
+}
+
+/// Compiled-in category defaults. NE (`NE` display label and `ne` asset
+/// id) targets `t9-16`: with `03-nepali-transliteration.md` unlanded the
+/// `tr`-model is unavailable, so the finer `pq|rs` + `wx|yz` splits are
+/// the measured collision win (exact collisions 38% -> 33%, 4-digit avg
+/// 2.6 -> 2.0). If `03` lands and `t9-9`+`tr` proves sufficient, move NE
+/// back to the global default. Mirrored in `layouts/cat_map.json`.
+const BUILTIN_CAT_DEFAULTS: &[(&str, &str)] =
+    &[("NE", "t9-16"), ("ne", "t9-16")];
 
 impl LayoutRegistry {
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Process-wide cached built-ins for precompute paths (insert-time
+    /// encoding under all three pads without re-parsing JSON per word).
+    pub fn builtins_cached() -> &'static LayoutRegistry {
+        static CELL: std::sync::OnceLock<LayoutRegistry> = std::sync::OnceLock::new();
+        CELL.get_or_init(LayoutRegistry::with_builtins)
+    }
+
     /// Built-ins embedded from `layouts/*.json` at compile time.
     /// `mapping.rs` stays as the fallback if a document fails to parse.
+    /// Seeds the NE -> `t9-16` category default (see
+    /// [`BUILTIN_CAT_DEFAULTS`]).
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
         for src in [
@@ -310,6 +380,13 @@ impl LayoutRegistry {
         }
         if !r.specs.contains_key(DEFAULT_LAYOUT_ID) {
             r.register(crate::mapping::t9_fallback_spec());
+        }
+        for (cat, layout) in BUILTIN_CAT_DEFAULTS {
+            // Only known-good pairs are seeded; a typo here must panic at
+            // startup rather than ship a silently-ignored default.
+            r.set_cat_layout(cat, layout).unwrap_or_else(|e| {
+                panic!("LayoutRegistry::with_builtins: built-in cat default invalid: {e}")
+            });
         }
         r
     }
@@ -330,12 +407,205 @@ impl LayoutRegistry {
         self.specs.get(id)
     }
 
-    /// Resolve `id`, falling back to `t9-9` (empty/unknown ids included).
+    /// Resolve `id`, falling back to the global default then `t9-9`
+    /// (empty/unknown ids included). Back-compat wrapper: prefer
+    /// [`Self::get_or_default_report`] when the caller can surface the
+    /// diagnostic.
     pub fn get_or_default(&self, id: &str) -> &LayoutSpec {
+        self.get_or_default_report(id).0
+    }
+
+    /// Resolve `id` with an explicit diagnostic: `None` on a clean hit,
+    /// `Some(context)` whenever an empty/unknown id (or a broken global
+    /// default) forced a fallback to `t9-9`.
+    pub fn get_or_default_report(&self, id: &str) -> (&LayoutSpec, Option<String>) {
+        if id.is_empty() {
+            let fb = self.default_spec();
+            return (
+                fb,
+                Some(format!(
+                    "LayoutRegistry::resolve: empty layout id; fell back to {:?}",
+                    fb.id
+                )),
+            );
+        }
+        if let Some(s) = self.specs.get(id) {
+            return (s, None);
+        }
+        let fb = self.default_spec();
+        (
+            fb,
+            Some(format!(
+                "LayoutRegistry::resolve: unknown layout id {id:?} (known: {:?}); fell back to {:?}",
+                self.ids(),
+                fb.id
+            )),
+        )
+    }
+
+    /// The global default spec (falls back to `t9-9` when `default_id`
+    /// itself is unset; `with_builtins` always holds `t9-9`).
+    fn default_spec(&self) -> &LayoutSpec {
         self.specs
-            .get(id)
+            .get(&self.default_id)
             .or_else(|| self.specs.get(DEFAULT_LAYOUT_ID))
             .expect("registry always holds the default layout")
+    }
+
+    /// Current global default layout id.
+    pub fn default_id(&self) -> &str {
+        &self.default_id
+    }
+
+    /// Layout id selected for `cat` before spec resolution
+    /// (`cat_map[cat]` or the global default).
+    pub fn cat_layout_id(&self, cat: &str) -> &str {
+        self.cat_map.get(cat).map(String::as_str).unwrap_or(&self.default_id)
+    }
+
+    /// Per-category override map (clone for inspection/tests).
+    pub fn cat_map(&self) -> HashMap<String, String> {
+        self.cat_map.clone()
+    }
+
+    /// Set the global default. Explicit error on empty/unknown ids;
+    /// the previous default is kept unchanged on failure.
+    pub fn set_default_layout(&mut self, id: &str) -> Result<(), String> {
+        if id.is_empty() {
+            return Err("LayoutRegistry::set_default_layout: layout id must not be empty".to_string());
+        }
+        if !self.specs.contains_key(id) {
+            return Err(format!(
+                "LayoutRegistry::set_default_layout: unknown layout id {id:?} (known: {:?})",
+                self.ids()
+            ));
+        }
+        self.default_id = id.to_string();
+        Ok(())
+    }
+
+    /// Set a per-category override. Explicit error on empty cat or
+    /// empty/unknown layout id; the previous mapping is kept on failure.
+    pub fn set_cat_layout(&mut self, cat: &str, layout_id: &str) -> Result<(), String> {
+        if cat.is_empty() {
+            return Err("LayoutRegistry::set_cat_layout: cat must not be empty".to_string());
+        }
+        if layout_id.is_empty() {
+            return Err(format!(
+                "LayoutRegistry::set_cat_layout: layout id for cat {cat:?} must not be empty"
+            ));
+        }
+        if !self.specs.contains_key(layout_id) {
+            return Err(format!(
+                "LayoutRegistry::set_cat_layout: unknown layout id {layout_id:?} for cat {cat:?} (known: {:?})",
+                self.ids()
+            ));
+        }
+        self.cat_map.insert(cat.to_string(), layout_id.to_string());
+        Ok(())
+    }
+
+    /// Drop a per-category override (falls back to the global default).
+    pub fn clear_cat_layout(&mut self, cat: &str) {
+        self.cat_map.remove(cat);
+    }
+
+    /// Resolve the spec for `cat`: `cat_map[cat]` -> global default ->
+    /// `t9-9`. Back-compat wrapper: prefer [`Self::resolve_report`]
+    /// when the caller can surface the diagnostic.
+    pub fn resolve(&self, cat: &str) -> &LayoutSpec {
+        self.resolve_report(cat).0
+    }
+
+    /// Resolve the spec for `cat` with an explicit diagnostic (`None` on
+    /// a clean hit, `Some(context)` on any fallback).
+    pub fn resolve_report(&self, cat: &str) -> (&LayoutSpec, Option<String>) {
+        match self.cat_map.get(cat) {
+            None => {
+                let (spec, err) = self.get_or_default_report(&self.default_id.clone());
+                // A broken global default is itself a reportable condition.
+                let diag = err.map(|e| {
+                    format!("LayoutRegistry::resolve: cat {cat:?} has no override; {e}")
+                });
+                (spec, diag)
+            }
+            Some(mapped) => {
+                let (spec, err) = self.get_or_default_report(mapped);
+                let diag = err.map(|e| {
+                    format!("LayoutRegistry::resolve: cat {cat:?} maps to invalid id; {e}")
+                });
+                (spec, diag)
+            }
+        }
+    }
+
+    /// Load a `layouts/cat_map.json` document, replacing the global
+    /// default (when `"default"` is present) and the whole override map.
+    /// Accepted shape:
+    /// `{"default": "t9-9", "cats": {"NE": "t9-16"}}`
+    /// or the flat shorthand `{"NE": "t9-16"}` (all values are cat ids).
+    /// Unknown/empty ids are a hard error (nothing is applied); an empty
+    /// document clears the overrides back to the global default.
+    pub fn load_cat_map_json(&mut self, s: &str) -> Result<(), String> {
+        let v: serde_json::Value =
+            serde_json::from_str(s).map_err(|e| format!("LayoutRegistry::load_cat_map_json: invalid JSON: {e}"))?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| "LayoutRegistry::load_cat_map_json: document must be a JSON object".to_string())?;
+        let (default, cats) = if obj.contains_key("cats") || obj.contains_key("default") {
+            let default = obj
+                .get("default")
+                .map(|d| {
+                    d.as_str().ok_or_else(|| {
+                        "LayoutRegistry::load_cat_map_json: \"default\" must be a string".to_string()
+                    })
+                })
+                .transpose()?;
+            let cats = obj
+                .get("cats")
+                .map(|c| {
+                    c.as_object().ok_or_else(|| {
+                        "LayoutRegistry::load_cat_map_json: \"cats\" must be an object".to_string()
+                    })
+                })
+                .transpose()?
+                .map(|m| m.iter().map(|(k, vv)| (k.clone(), vv.clone())).collect::<Vec<_>>())
+                .unwrap_or_default();
+            (default, cats)
+        } else {
+            (None, obj.iter().map(|(k, vv)| (k.clone(), vv.clone())).collect::<Vec<_>>())
+        };
+        if let Some(d) = default {
+            if d.is_empty() || !self.specs.contains_key(d) {
+                return Err(format!(
+                    "LayoutRegistry::load_cat_map_json: unknown default layout id {d:?} (known: {:?}); nothing applied",
+                    self.ids()
+                ));
+            }
+        }
+        let mut parsed = Vec::with_capacity(cats.len());
+        for (cat, vv) in &cats {
+            let id = vv.as_str().ok_or_else(|| {
+                format!("LayoutRegistry::load_cat_map_json: layout id for cat {cat:?} must be a string")
+            })?;
+            if cat.is_empty() {
+                return Err(
+                    "LayoutRegistry::load_cat_map_json: cat must not be empty; nothing applied".to_string(),
+                );
+            }
+            if id.is_empty() || !self.specs.contains_key(id) {
+                return Err(format!(
+                    "LayoutRegistry::load_cat_map_json: unknown layout id {id:?} for cat {cat:?} (known: {:?}); nothing applied",
+                    self.ids()
+                ));
+            }
+            parsed.push((cat.clone(), id.to_string()));
+        }
+        if let Some(d) = default {
+            self.default_id = d.to_string();
+        }
+        self.cat_map = parsed.into_iter().collect();
+        Ok(())
     }
 
     pub fn ids(&self) -> Vec<String> {
@@ -433,6 +703,146 @@ mod tests {
         let r = registry();
         assert_eq!(r.get_or_default("nope").layout_id(), "t9-9");
         assert_eq!(r.get_or_default("").layout_id(), "t9-9");
+    }
+
+    #[test]
+    fn layout02_builtin_cat_defaults_ne_t9_16() {
+        // NE decision (plan/02, coordinated with plan/03 state): the
+        // `tr`-model is Roman-input based, so the finer Latin splits of
+        // t9-16 still win for NE until 03 proves t9-9+tr sufficient.
+        let r = registry();
+        assert_eq!(r.default_id(), "t9-9");
+        assert_eq!(r.cat_layout_id("NE"), "t9-16");
+        assert_eq!(r.cat_layout_id("ne"), "t9-16");
+        assert_eq!(r.resolve("NE").layout_id(), "t9-16");
+        assert_eq!(r.resolve("EN").layout_id(), "t9-9");
+        assert_eq!(r.resolve("").layout_id(), "t9-9");
+        // Clean resolves carry no diagnostic.
+        assert!(r.resolve_report("NE").1.is_none());
+        assert!(r.resolve_report("EN").1.is_none());
+    }
+
+    #[test]
+    fn layout02_resolve_report_is_loud() {
+        let mut r = registry();
+        // A cat override pointing at a spec that later disappears must
+        // fall back loudly, never silently.
+        let id = r
+            .register_json(
+                r##"{"id":"tmp-4","title":"Tmp","grid":{"cols":2,"rows":2},
+                    "keys":[{"code":"1","label":"ab","symbols":"ab","role":"text","row":0,"col":0},
+                            {"code":"2","label":"cd","symbols":"cd","role":"text","row":0,"col":1},
+                            {"code":"*","label":"sym","symbols":"","role":"control","row":1,"col":0},
+                            {"code":"#","label":"del","symbols":"","role":"delete","row":1,"col":1}],
+                    "adjacency":{"1":["2","*","#"],"2":["1","*","#"],
+                                 "*":["1","2","#"],"#":["1","2","*"]}}"##,
+            )
+            .unwrap();
+        r.set_cat_layout("tmp", &id).unwrap();
+        assert!(r.resolve_report("tmp").1.is_none());
+        // Simulate the spec disappearing (unregister path): drop it and
+        // the resolve must fall back loudly, never silently.
+        r.specs.remove(&id);
+        let (spec, err) = r.resolve_report("tmp");
+        assert_eq!(spec.layout_id(), "t9-9");
+        let err = err.expect("fallback must carry a diagnostic");
+        assert!(err.contains("tmp"), "unexpected diagnostic: {err}");
+        // Unknown/empty direct ids are loud too.
+        assert!(r.get_or_default_report("nope").1.is_some());
+        assert!(r.get_or_default_report("").1.is_some());
+        assert!(r.get_or_default_report("t9-9").1.is_none());
+    }
+
+    #[test]
+    fn layout02_setters_reject_loudly() {
+        let mut r = registry();
+        assert!(r.set_default_layout("").is_err());
+        assert!(r.set_default_layout("t9-99").is_err());
+        assert!(r.set_cat_layout("", "t9-9").is_err());
+        assert!(r.set_cat_layout("EN", "").is_err());
+        assert!(r.set_cat_layout("EN", "t9-99").is_err());
+        // Failed setters change nothing.
+        assert_eq!(r.default_id(), "t9-9");
+        assert_eq!(r.cat_layout_id("EN"), "t9-9");
+        // Valid setters apply.
+        r.set_default_layout("t9-16").unwrap();
+        assert_eq!(r.default_id(), "t9-16");
+        assert_eq!(r.resolve("EN").layout_id(), "t9-16");
+        // NE override still wins over the new global.
+        assert_eq!(r.resolve("NE").layout_id(), "t9-16");
+        r.set_cat_layout("EN", "t9-12").unwrap();
+        assert_eq!(r.resolve("EN").layout_id(), "t9-12");
+        r.clear_cat_layout("EN");
+        assert_eq!(r.resolve("EN").layout_id(), "t9-16");
+    }
+
+    #[test]
+    fn layout02_cat_map_json_roundtrip() {
+        let mut r = registry();
+        // Structured form (mirrors layouts/cat_map.json).
+        r.load_cat_map_json(
+            r#"{"default":"t9-12","cats":{"EN":"t9-9","NE":"t9-16"}}"#,
+        )
+        .unwrap();
+        assert_eq!(r.default_id(), "t9-12");
+        assert_eq!(r.resolve("EN").layout_id(), "t9-9");
+        assert_eq!(r.resolve("NE").layout_id(), "t9-16");
+        assert_eq!(r.resolve("js").layout_id(), "t9-12");
+        // Flat shorthand replaces the whole map.
+        r.load_cat_map_json(r#"{"NE":"t9-9"}"#).unwrap();
+        assert_eq!(r.default_id(), "t9-12");
+        assert_eq!(r.resolve("NE").layout_id(), "t9-9");
+        assert_eq!(r.resolve("EN").layout_id(), "t9-12");
+        // The checked-in file loads and matches the compiled defaults.
+        let src = include_str!("../../layouts/cat_map.json");
+        let mut r2 = registry();
+        r2.load_cat_map_json(src).unwrap();
+        assert_eq!(r2.default_id(), "t9-9");
+        assert_eq!(r2.resolve("NE").layout_id(), "t9-16");
+        assert_eq!(r2.resolve("ne").layout_id(), "t9-16");
+    }
+
+    #[test]
+    fn layout02_cat_map_json_rejects_loudly() {
+        let mut r = registry();
+        let before_default = r.default_id().to_string();
+        let before_map = r.cat_map();
+        for bad in [
+            "not json",
+            "[1,2]",
+            r#"{"default":"t9-99","cats":{}}"#,
+            r#"{"default":"","cats":{}}"#,
+            r#"{"default":42,"cats":{}}"#,
+            r#"{"cats":{"EN":"t9-99"}}"#,
+            r#"{"cats":{"EN":""}}"#,
+            r#"{"cats":{"": "t9-9"}}"#,
+            r#"{"cats":{"EN":42}}"#,
+            r#"{"EN":"t9-99"}"#,
+        ] {
+            assert!(
+                r.load_cat_map_json(bad).is_err(),
+                "must reject {bad}"
+            );
+        }
+        // Nothing applied on any failure.
+        assert_eq!(r.default_id(), before_default);
+        assert_eq!(r.cat_map(), before_map);
+    }
+
+    #[test]
+    fn layout02_contains_code_and_reuse_buffer() {
+        let r = registry();
+        let t9 = r.get_or_default("t9-9");
+        assert!(t9.contains_code('2'));
+        assert!(!t9.contains_code('A'));
+        let t16 = r.get_or_default("t9-16");
+        assert!(t16.contains_code('A'));
+        assert!(t16.contains_code('B'));
+        let mut buf = String::from("junk");
+        t16.encode_word_into("fun", &mut buf);
+        assert_eq!(buf, "396");
+        t9.encode_word_into("fun", &mut buf);
+        assert_eq!(buf, "386");
     }
 
     #[test]
