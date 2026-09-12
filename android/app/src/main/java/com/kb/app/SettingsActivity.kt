@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import android.widget.Toast
+import com.kb.ime.CustomPackStore
 import com.kb.ime.GestureLog
 import com.kb.ime.GestureThresholds
 import com.kb.ime.GestureTuningStore
@@ -78,6 +79,7 @@ fun SettingsScreen() {
             Text("Open enable-IME wizard")
         }
         LayoutSettingsSection()
+        CustomCategorySection()
         GestureTuningSection()
     }
 }
@@ -184,6 +186,160 @@ fun LayoutSettingsSection() {
         global = readGlobal()
         overrides = readOverrides()
     }) { Text("Refresh layout settings") }
+}
+
+/**
+ * Settings → Custom categories (user packs, plan/08): create a new tab
+ * from a pasted/imported wordlist, toggle it, export/import the set.
+ * There is no built-in names starter list (import-only by design — see
+ * `docs/CUSTOM_CATEGORIES.md`). Every save/import validates loudly:
+ * the exact per-row errors render inline and nothing is stored unless
+ * the whole pack validates.
+ */
+@Composable
+fun CustomCategorySection() {
+    val context = LocalContext.current
+    var error by remember { mutableStateOf<String?>(null) }
+    var savedTick by remember { mutableStateOf(0) }
+    var id by remember { mutableStateOf("") }
+    var title by remember { mutableStateOf("") }
+    var priorityText by remember { mutableStateOf("50") }
+    var wordlist by remember { mutableStateOf("") }
+    var importText by remember { mutableStateOf("") }
+    var exportText by remember { mutableStateOf<String?>(null) }
+
+    fun readPacks() = try {
+        CustomPackStore.list(context)
+    } catch (e: Exception) {
+        error = "Custom packs unreadable: ${e.message}"
+        emptyList()
+    }
+
+    var packs by remember(savedTick) { mutableStateOf(readPacks()) }
+
+    Text(
+        "Custom categories", style = MaterialTheme.typography.headlineSmall,
+        modifier = Modifier.padding(top = 24.dp)
+    )
+    Text(
+        "New tab from your own wordlist (e.g. a names list). " +
+            "One `word [freq]` per line, `#` comments allowed. " +
+            "New tabs isolate to their own words; learned words overlay " +
+            "under the tab. Takes effect in the engine after the keyboard restarts.",
+        style = MaterialTheme.typography.labelSmall
+    )
+    error?.let {
+        Text(it, color = MaterialTheme.colorScheme.error)
+    }
+
+    packs.forEach { pack ->
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                "${pack.title} (${pack.id}, prio ${pack.priority})",
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(vertical = 12.dp)
+            )
+            Switch(
+                checked = pack.enabled,
+                onCheckedChange = { enabled ->
+                    try {
+                        CustomPackStore.setEnabled(context, pack.id, enabled)
+                        error = null
+                        savedTick++
+                        packs = readPacks()
+                    } catch (e: Exception) {
+                        error = "Toggle failed: ${e.message}"
+                    }
+                }
+            )
+            TextButton(onClick = {
+                try {
+                    CustomPackStore.remove(context, pack.id)
+                    error = null
+                    savedTick++
+                    packs = readPacks()
+                } catch (e: Exception) {
+                    error = "Delete failed: ${e.message}"
+                }
+            }) { Text("Delete") }
+        }
+    }
+
+    Text("New category", style = MaterialTheme.typography.titleMedium)
+    androidx.compose.material3.OutlinedTextField(
+        value = id, onValueChange = { id = it },
+        label = { Text("id (e.g. names)") },
+        modifier = Modifier.fillMaxWidth()
+    )
+    androidx.compose.material3.OutlinedTextField(
+        value = title, onValueChange = { title = it },
+        label = { Text("title (e.g. Names)") },
+        modifier = Modifier.fillMaxWidth()
+    )
+    androidx.compose.material3.OutlinedTextField(
+        value = priorityText, onValueChange = { priorityText = it },
+        label = { Text("priority 10-90") },
+        modifier = Modifier.fillMaxWidth()
+    )
+    androidx.compose.material3.OutlinedTextField(
+        value = wordlist, onValueChange = { wordlist = it },
+        label = { Text("wordlist (word [freq] per line)") },
+        minLines = 4,
+        modifier = Modifier.fillMaxWidth()
+    )
+    Button(onClick = {
+        try {
+            val priority = priorityText.trim().toIntOrNull()
+                ?: throw IllegalArgumentException("priority \"$priorityText\" is not a number (10-90)")
+            CustomPackStore.save(context, id.trim(), title.trim(), wordlist, priority)
+            error = null
+            id = ""
+            title = ""
+            wordlist = ""
+            savedTick++
+            packs = readPacks()
+        } catch (e: Exception) {
+            error = "Save failed: ${e.message}"
+        }
+    }) { Text("Save category") }
+
+    Text("Export / import", style = MaterialTheme.typography.titleMedium,
+        modifier = Modifier.padding(top = 8.dp))
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Button(onClick = {
+            try {
+                exportText = CustomPackStore.exportJson(context)
+                error = null
+            } catch (e: Exception) {
+                error = "Export failed: ${e.message}"
+            }
+        }) { Text("Export") }
+        TextButton(onClick = {
+            try {
+                val imported = CustomPackStore.importJson(context, importText)
+                error = null
+                importText = ""
+                savedTick++
+                packs = readPacks()
+                Toast.makeText(context, "Imported ${imported.size} pack(s)", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                error = "Import failed: ${e.message}"
+            }
+        }) { Text("Import pasted JSON") }
+    }
+    exportText?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
+    androidx.compose.material3.OutlinedTextField(
+        value = importText, onValueChange = { importText = it },
+        label = { Text("paste export JSON to import") },
+        minLines = 2,
+        modifier = Modifier.fillMaxWidth()
+    )
+    Button(onClick = {
+        savedTick++
+        packs = readPacks()
+        error = null
+    }) { Text("Refresh custom categories") }
 }
 
 /**
