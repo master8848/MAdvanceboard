@@ -415,7 +415,9 @@ fun PadSizeToggle(
     modifier: Modifier = Modifier,
     activeTabLabel: String = ""
 ) {
-    val options = listOf("t9-9" to "9", "t9-12" to "12", "t9-16" to "16")
+    // Short labels derive from the canonical ids (single source of truth in
+    // SUPPORTED_LAYOUT_IDS) so a new pad size appears here automatically.
+    val options = SUPPORTED_LAYOUT_IDS.map { it to it.removePrefix("t9-") }
     Row(modifier = modifier.fillMaxWidth()) {
         Text(
             text = if (activeTabLabel.isEmpty()) "Pad:" else "Pad ($activeTabLabel):",

@@ -19,6 +19,9 @@ object GestureTuningStore {
     const val KEY_FOOTER_DISMISSED = "footer_hint_dismissed"
     const val KEY_FOOTER_FIRST_SHOWN_TS = "footer_first_shown_ts"
 
+    /** Footer hint visibility window after first shown (3 days). */
+    const val FOOTER_HINT_WINDOW_MS = 3L * 24 * 60 * 60 * 1000
+
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -135,7 +138,7 @@ object GestureTuningStore {
 
     /**
      * Footer hint `← del · ↑ space · → accept`: visible until dismissed or
-     * 3 days after first shown. Returns false when it must be hidden.
+     * [FOOTER_HINT_WINDOW_MS] after first shown. Returns false when hidden.
      */
     fun showFooterHint(context: Context, nowMs: Long = System.currentTimeMillis()): Boolean {
         try {
@@ -146,7 +149,7 @@ object GestureTuningStore {
                 p.edit().putLong(KEY_FOOTER_FIRST_SHOWN_TS, nowMs).apply()
                 return true
             }
-            return nowMs - first < 3L * 24 * 60 * 60 * 1000
+            return nowMs - first < FOOTER_HINT_WINDOW_MS
         } catch (_: Exception) {
             return false
         }

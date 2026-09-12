@@ -36,6 +36,12 @@ data class LayoutSpecUi(
 const val DEFAULT_LAYOUT_ID = "t9-9"
 val SUPPORTED_LAYOUT_IDS = listOf("t9-9", "t9-12", "t9-16")
 
+/** Minimum touch target for every pad key (48dp accessibility floor). */
+const val MIN_KEY_TARGET_DP = 48
+
+/** Inner padding of the pad grid (dp). */
+const val PAD_PADDING_DP = 16
+
 /** Key roles understood by [PadView]; unknown roles fall back to `text`. */
 object PadRoles {
     const val TEXT = "text"

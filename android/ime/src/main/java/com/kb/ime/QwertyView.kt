@@ -62,7 +62,7 @@ class QwertyView @JvmOverloads constructor(
     init {
         orientation = VERTICAL
         val density = resources.displayMetrics.density
-        val minHeight = (48 * density).toInt()
+        val minHeight = (MIN_KEY_TARGET_DP * density).toInt()
         for (rowChars in rows) {
             val row = LinearLayout(context).apply { orientation = HORIZONTAL }
             for (c in rowChars) {
@@ -78,7 +78,7 @@ class QwertyView @JvmOverloads constructor(
         }
         // Bottom action row: Sym | Space | Delete | Enter | Next-IME.
         val actions = LinearLayout(context).apply { orientation = HORIZONTAL }
-        val minTarget = (48 * density).toInt()
+        val minTarget = (MIN_KEY_TARGET_DP * density).toInt()
         actions.addView(Button(context).apply {
             text = "Sym"
             minimumWidth = minTarget

@@ -104,9 +104,9 @@ open class PadView @JvmOverloads constructor(
     init {
         rowCount = spec.rows
         columnCount = spec.cols
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        val pad = (PAD_PADDING_DP * resources.displayMetrics.density).toInt()
         setPadding(pad)
-        val minTarget = (48 * resources.displayMetrics.density).toInt()
+        val minTarget = (MIN_KEY_TARGET_DP * resources.displayMetrics.density).toInt()
         for (key in spec.keys) {
             val btn = Button(context).apply {
                 text = key.label.ifEmpty { key.code }
