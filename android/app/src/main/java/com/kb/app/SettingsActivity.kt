@@ -82,6 +82,7 @@ fun SettingsScreen() {
         DictStackSection()
         CustomCategorySection()
         GestureTuningSection()
+        ClipboardSettingsSection()
     }
 }
 
