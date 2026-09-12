@@ -71,7 +71,7 @@ data class PlacementState(
  * - [undoAvailable]/[onUndo]: 5s undo affordance after a fling-delete commit.
  * - [fallbackActionsVisible] + [fallbackActions]: 48dp AT button cluster
  *   shown when TalkBack/SwitchAccess/VoiceAccess disables Pad flings.
- * - First-run 3-step gesture coach (Skip + replayable via Gesture Tuning)
+ * - First-run 3-step T9 coach (Skip + replayable via Gesture Tuning)
  *   and the faint `← del · ↑ space · → accept` footer (first 3 days,
  *   dismissable) — persisted in [GestureTuningStore].
  */
@@ -478,19 +478,23 @@ fun SymbolsSheet(
     }
 }
 
-/** First-run 3-step gesture coach: ← delete / ↑ space / → accept. */
+/** First-run 3-step T9 coach: tap-once-per-letter, QWERTY fallback, tab swipe. */
 @Composable
 fun GestureCoach(onSkip: () -> Unit, onDone: () -> Unit) {
     var step by remember { mutableIntStateOf(0) }
     val steps = listOf(
-        "Fling ← on the pad to delete (slide further for whole words).",
-        "Fling ↑ on the pad for space + accept top suggestion.",
-        "Fling → on the pad to accept the top suggestion."
+        "T9 typing: tap each digit key ONCE per letter (e.g. 4-3-5-5-6 " +
+            "suggests \"hello\"). This is NOT multitap — never press " +
+            "repeatedly, never wait; the strip guesses the word.",
+        "Prefer full keys? Tap QWERTY (top row) for the full keyboard, " +
+            "9-KEY to come back — or swipe DOWN on the suggestion strip.",
+        "Swipe ←/→ on the category tabs (General, NE, …) to switch " +
+            "dictionaries. Long-press a tab for its pack info."
     )
     Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                text = "Gestures — step ${step + 1} of 3",
+                text = "Welcome to T9 — step ${step + 1} of 3",
                 style = MaterialTheme.typography.titleSmall
             )
             Text(text = steps[step], modifier = Modifier.padding(vertical = 8.dp))

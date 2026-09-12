@@ -438,11 +438,11 @@ fun GestureTuningSection() {
     Button(onClick = {
         try {
             GestureTuningStore.requestCoachReplay(context)
-            error = "Coach will replay on next input view"
+            error = "T9 coach will replay on next input view"
         } catch (e: Exception) {
             error = "Coach replay failed: ${e.message}"
         }
-    }) { Text("Replay gesture coach") }
+    }) { Text("Replay T9 coach") }
 
     Text("False-trigger log (log.jsonl)", style = MaterialTheme.typography.titleMedium,
         modifier = Modifier.padding(top = 16.dp))
