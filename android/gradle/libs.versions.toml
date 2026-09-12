@@ -11,7 +11,7 @@ room = "2.8.5"
 datastore = "1.2.1"
 work = "2.11.2"
 coroutines = "1.11.0"
-jna = "5.14.0"
+jna = "5.19.1"
 junit = "4.13.2"
 savedstate = "1.5.0"
 
