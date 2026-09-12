@@ -9,6 +9,19 @@ import org.json.JSONObject
  * Wire name is `del` (canonical, SPEC §5); `deleted` (SPEC §4) is still
  * accepted on read for compat.
  */
+/** One skipped JSONL input line with its cause. Replaces silent drops:
+ * every malformed line lands here so importers can surface the count. */
+data class JsonlSkippedLine(val lineNumber: Int, val cause: String)
+
+/**
+ * Strict JSONL import outcome: parsed rows plus every malformed line with
+ * its cause. `skipped.isEmpty()` means a lossless import.
+ */
+data class JsonlImportOutcome(
+    val rows: List<PersonalWordEntity>,
+    val skipped: List<JsonlSkippedLine>
+)
+
 object SyncMerge {
     fun mergeWord(local: PersonalWordEntity, remote: PersonalWordEntity): PersonalWordEntity {
         if (remote.lastSeen > local.lastSeen) return remote
@@ -41,27 +54,49 @@ object SyncMerge {
                 .toString()
         }
 
-    /** Import JSONL previously produced by [toJsonl]; skips malformed lines. */
+    /**
+     * Import JSONL previously produced by [toJsonl].
+     *
+     * Lenient entry point (kept for compat): malformed lines are skipped.
+     * Prefer [fromJsonlWithDiagnostics] — it returns the same rows PLUS the
+     * per-line [JsonlSkippedLine] causes this method drops. A non-empty
+     * `skipped` means the peer sent corrupt rows: log the count, never
+     * assume a lossless import.
+     */
     fun fromJsonl(jsonl: String): List<PersonalWordEntity> =
+        fromJsonlWithDiagnostics(jsonl).rows
+
+    /**
+     * Strict import: never drops silently. Every non-blank line yields
+     * either a row in [JsonlImportOutcome.rows] or an entry in
+     * [JsonlImportOutcome.skipped] with the 1-based line number + cause.
+     */
+    fun fromJsonlWithDiagnostics(jsonl: String): JsonlImportOutcome {
+        val rows = mutableListOf<PersonalWordEntity>()
+        val skipped = mutableListOf<JsonlSkippedLine>()
         jsonl.lineSequence()
             .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .mapNotNull { line ->
+            .forEachIndexed { index, line ->
+                if (line.isEmpty()) return@forEachIndexed
                 try {
                     val o = JSONObject(line)
                     // Compat: accept legacy `deleted` (SPEC §4) as well as `del` (SPEC §5).
                     val tombstone = if (o.has("del")) o.optBoolean("del", false)
                         else o.optBoolean("deleted", false)
-                    PersonalWordEntity(
-                        word = o.getString("word"),
-                        lang = o.optString("lang", "en"),
-                        count = o.optLong("count", 1L),
-                        lastSeen = o.optLong("last_seen", 0L),
-                        deleted = tombstone,
-                        deviceId = o.optString("device_id", "")
+                    rows.add(
+                        PersonalWordEntity(
+                            word = o.getString("word"),
+                            lang = o.optString("lang", "en"),
+                            count = o.optLong("count", 1L),
+                            lastSeen = o.optLong("last_seen", 0L),
+                            deleted = tombstone,
+                            deviceId = o.optString("device_id", "")
+                        )
                     )
-                } catch (_: Exception) {
-                    null
+                } catch (e: Exception) {
+                    skipped.add(JsonlSkippedLine(index + 1, e.message ?: e.javaClass.simpleName))
                 }
-            }.toList()
+            }
+        return JsonlImportOutcome(rows, skipped)
+    }
 }
