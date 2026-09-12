@@ -1,22 +1,27 @@
 # Android IME shell
 
-Kotlin Android shell for the 9-key predictive keyboard. Toolchain: AGP 9.4.0,
-Gradle 9.6.0, JDK 17, Kotlin 2.2.20, compileSdk/targetSdk 36, minSdk 26,
-Compose BOM 2026.09.00.
+Kotlin Android shell for the configurable predictive keyboard (9-key default). Toolchain: AGP 9.4.0,
+Gradle 9.6.0, JDK 17, Kotlin 2.3.20 (KSP 2.3.12), compileSdk/targetSdk 36, minSdk 26,
+Compose BOM 2026.06.01 (see `BUILD_STATUS.md` for why 2.2.20 / 2026.09.00 proved unbuildable).
 
 ## Modules
 
 - `app` — Settings Activity + onboarding enable-IME wizard.
-- `ime` — `InputMethodService` skeleton, 9-key `KeyPadView`, Compose suggestion
+- `ime` — `InputMethodService` skeleton, configurable `PadView` (9-key default), Compose suggestion
   strip (`LazyRow`), category `TabRow`, expand-all fullscreen `LazyColumn`,
   QWERTY fallback toggle. Manifests in `ime/src/main/assets/categories/`.
 - `plugin-api` — `CategoryProvider` interface, `SuggestionQuery` /
   `SuggestionItem` / `CommitContext` models, `CategoryRegistry` JSON loader.
-- `core-bridge` — `System.loadLibrary("kbcore")` stub + `Predictor` interface
-  (`new` / `suggest` / `learn` / `forget` / `reject` / `exportSession` on
-  `Dispatchers.Default`, no Android Context; `forget`/`exportSession` mirror
-  the Rust UniFFI surface, `reject` awaits a core export + `uniffi-bindgen`
-  regen — `StubPredictor` covers all six in memory until then).
+- `core-bridge` — `System.loadLibrary("kbcore")` probe + `Predictor` interface
+  (`suggest` / `suggestWithLayout` / `suggestForCat` / `learn` /
+  `learnWithShown` / `forget` / `reject` / `rejectWithShown` / `exportSession`
+  + layout and persist passthroughs on `Dispatchers.Default`, no Android
+  Context; mirrors the Rust UniFFI surface including `reject`, regen with
+  `uniffi-bindgen 0.32.1`). `UniFfiPredictor` is the default path;
+  `StubPredictor` is degraded-only (missing `.so` or init failure) with the
+  cause carried user-visibly — stub candidates score 0.0 with empty `seq`,
+  layout/persist calls without an in-memory equivalent throw naming the
+  missing `.so`.
 - `sync` — Room + DataStore stubs, `WorkManager` 24h periodic work (within the
   12–24h budget), LWW per-word merge, JSONL export/import, opt-in only.
 

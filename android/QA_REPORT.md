@@ -57,8 +57,17 @@ Minor observations (not failures, left as-is per minimal-change rule): `KbInputM
 
 ## Remaining items needing JDK 17 + `assembleDebug`
 
+> Addendum 2026-09-12 (toolchain bump, see `android/BUILD_STATUS.md`):
+> the §1 / §Re-test rows below still record Kotlin 2.2.20, KSP
+> `2.2.20-2.0.2`, Compose BOM 2026.09.00 as-found. Current pins are
+> Kotlin **2.3.20**, KSP **2.3.12**, BOM **2026.06.01**
+> (`gradle/libs.versions.toml:3-5`) — 2.2.20 cannot build under AGP 9.4
+> and BOM 2026.09.00 needs compileSdk 37 (no android-37 platform on the
+> build host). `assembleDebug` is green (run 11). Historical rows kept
+> verbatim; treat the pins here as superseding them.
+
 - [ ] `export JAVA_HOME=<jdk17> && ./gradlew :app:assembleDebug :ime:assembleDebug :sync:assembleDebug` (no Java runtime here; static checks only).
-- [ ] `./gradlew lint` / Android Lint on `ime` (Compose, `ScrollableTabRow` in `CategoryTabs.kt:28`, `LazyRow`/`LazyColumn` usage).
+- [ ] `./gradlew lint` / Android Lint on `ime` (Compose, `PrimaryScrollableTabRow` in `CategoryTabs.kt:28`, `LazyRow`/`LazyColumn` usage).
 - [ ] Instrumented check: enable IME via `OnboardingActivity`, type into password vs. plain fields, confirm no learning on password fields and `cachedInputView` reuse across `onCreateInputView` calls.
 - [ ] Room/KSP verify: `:sync:kspDebugKotlin` (compiler `room-compiler` wired at `sync/build.gradle.kts:38`).
 - [ ] WorkManager verify: toggle sync opt-in in `SettingsActivity`, confirm 24h periodic work enqueued/cancelled (`adb shell dumpsys jobscheduler`).
