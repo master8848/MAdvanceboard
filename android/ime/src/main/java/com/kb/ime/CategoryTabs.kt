@@ -14,7 +14,12 @@ val DEFAULT_CATEGORIES = listOf(
     "numbers", "words", "ne", "js", "rust", "html", "emoji", "math", "★personal"
 )
 
-/** Horizontally scrollable category tabs plus an expand-all (∨) button. */
+/**
+ * Zone separation (plan 01): this row owns horizontal scroll/swipe ONLY.
+ * Tap / h-scroll switches category (sets dict filter + layout resolve);
+ * no delete, no accept, no hide here. The Pad must never switch categories
+ * (rejected: conflicts with delete/accept flings).
+ */
 @Composable
 fun CategoryTabs(
     categories: List<String> = DEFAULT_CATEGORIES,
