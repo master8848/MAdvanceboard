@@ -10,7 +10,8 @@
 ## Reporting a vulnerability
 
 - **Do not** open a public issue for sensitive security bugs.
-- Email: **jobarsanjel2@gmail.com** with subject `[MAdvanceboard SECURITY]`.
+- Use GitHub private vulnerability reporting:
+  https://github.com/master8848/MAdvanceboard/security/advisories/new
 - Include: affected version/commit, repro steps, impact assessment.
 
 We aim to acknowledge within 72 hours and will coordinate a fix + disclosure.

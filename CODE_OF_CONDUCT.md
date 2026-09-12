@@ -14,7 +14,8 @@ level, nationality, or religion.
 
 ## Enforcement
 
-Violations can be reported to **jobarsanjel2@gmail.com**. Maintainers may
+Violations can be reported via
+https://github.com/master8848/MAdvanceboard/issues. Maintainers may
 remove comments/commits or ban contributors who violate this code.
 
 Full text: https://www.contributor-covenant.org/version/2/1/code_of_conduct/
