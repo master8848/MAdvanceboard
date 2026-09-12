@@ -8,6 +8,7 @@ pub mod predictor;
 pub mod rank;
 pub mod session;
 pub mod stack;
+pub mod store;
 
 pub use layout::{KeyMapping, LayoutRegistry, LayoutSpec, DEFAULT_LAYOUT_ID};
 pub use predictor::Predictor;
