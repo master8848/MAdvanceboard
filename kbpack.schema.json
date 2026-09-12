@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kb9.example/kbpack.schema.json",
+  "title": "kbpack manifest (kbpack.json)",
+  "description": "Manifest for an open-format .kbpack extension pack (SPEC section 3).",
+  "type": "object",
+  "required": ["id", "version", "kind", "name"],
+  "additionalProperties": true,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Reverse-DNS or short pack id, e.g. com.ex.ne-math.",
+      "examples": ["com.ex.ne-math"]
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.+-]+)?$",
+      "description": "Semver pack version.",
+      "examples": ["1.2.0"]
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["vocab"],
+      "description": "Pack kind. MVP only ships vocab packs."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable display name.",
+      "examples": ["Math/LaTeX"]
+    },
+    "license": {
+      "type": "string",
+      "description": "SPDX license expression.",
+      "examples": ["MIT"]
+    },
+    "paid": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether the pack is a paid plugin. Uncertified/unsigned packs install with a warning; the loader is never exclusive to the store."
+    },
+    "langs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "examples": [["en", "ne", "latex"]]
+    },
+    "categories": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "examples": [["math"]]
+    },
+    "priority": {
+      "type": "integer",
+      "description": "Stack priority: base EN/NE is 0, extensions 10-90 (user-ordered), personal 100."
+    },
+    "dict": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Dictionary payload files inside the .kbpack bundle.",
+      "examples": [["dict.jsonl.gz"]]
+    },
+    "tokenizer": {
+      "type": "string",
+      "description": "Optional WASM tokenizer id (word -> seq). Sandboxed on Android; no arbitrary code.",
+      "examples": ["latex"]
+    },
+    "minCore": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.+-]+)?$",
+      "description": "Minimum kbcore version required to load this pack.",
+      "examples": ["0.3.0"]
+    }
+  }
+}
