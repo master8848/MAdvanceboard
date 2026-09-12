@@ -71,6 +71,9 @@ class KbInputMethodService : InputMethodService() {
     /** Live candidates fed by [Predictor.suggest]; read by the Compose strip. */
     private var liveCandidates by mutableStateOf(emptyList<String>())
 
+    /** Live pad layout id; read by [ImeScreen]'s toggle, written by [setPadLayout]. */
+    private var liveLayoutId by mutableStateOf(DEFAULT_LAYOUT_ID)
+
     /** Service-scoped scope for suggest/learn; cancelled in [onDestroy]. */
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -83,6 +86,9 @@ class KbInputMethodService : InputMethodService() {
 
     override fun onCreate() {
         super.onCreate()
+        // Restore the user's persisted pad-size toggle before first inflate.
+        activeLayoutId = PadModeStore.load(this)
+        liveLayoutId = activeLayoutId
         activeSpec = loadLayoutSpec(this, activeLayoutId)
         // Warm category learn-flags + native-lib probe off the main thread.
         serviceScope.launch {
@@ -119,7 +125,9 @@ class KbInputMethodService : InputMethodService() {
                         qwertyFallback = !qwertyFallback
                         refreshPad(root)
                     },
-                    onCategoryChanged = { onCategoryChanged(it) }
+                    onCategoryChanged = { onCategoryChanged(it) },
+                    activeLayoutId = liveLayoutId,
+                    onLayoutChanged = { setPadLayout(PadModeStore.save(this, it)) }
                 )
             }
         }
@@ -305,6 +313,7 @@ class KbInputMethodService : InputMethodService() {
     internal fun setPadLayout(layoutId: String) {
         if (layoutId !in SUPPORTED_LAYOUT_IDS) return
         activeLayoutId = layoutId
+        liveLayoutId = layoutId
         activeSpec = loadLayoutSpec(this, layoutId)
         seq.clear()
         (cachedInputView as? LinearLayout)?.let { refreshPad(it) }
