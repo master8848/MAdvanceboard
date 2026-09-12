@@ -12,6 +12,14 @@
 //! Tie-break: shorter word, then lexicographic, then pack priority.
 
 /// Tunable weights (constants in core, tunable per user in Settings).
+/// Provenance: `w_cat` was retuned 0.3 → 1.5 on the TRAIN split only
+/// (coordinate sweep per 09#1: train +0.0157, monotone 0.0/0.6/1.0/1.5 curve
+/// on both splits) and confirmed on the frozen held-out gate set (+0.0153
+/// scope OFF, no KSPW / learning-lift regression). Plateau 1.5–3.0 is flat,
+/// so the optimum is broad, not a sharp overfit peak. All other weights
+/// kept: `w_base`/`w_reject`/`hide_threshold` showed ~zero elasticity,
+/// `w_keyfit` increases HURT both splits (−0.025 train / −0.019 held at 2.0),
+/// `w_bigram` is a no-op on ctx="" arms by construction.
 #[derive(Clone, Debug)]
 pub struct RankWeights {
     pub w_base: f64,
@@ -32,7 +40,7 @@ impl Default for RankWeights {
             w_personal: 1.2,
             w_bigram: 0.8,
             w_recency: 0.5,
-            w_cat: 0.3,
+            w_cat: 1.5,
             w_keyfit: 0.2,
             w_reject: 1.5,
             hide_threshold: -0.5,
@@ -201,6 +209,22 @@ mod tests {
         assert!(s < 0.0, "smoothed bigram must be negative, got {s}");
         let seen = bigram_term(9, 10, 10_000);
         assert!(seen > s, "observed pair must outrank unseen pair");
+    }
+
+    #[test]
+    fn tuned_cat_weight_demotes_cross_tab_distractors() {
+        // Train-tuned w_cat=1.5 (see RankWeights docs): a same-tab candidate
+        // beats a 2x-frequency cross-tab distractor. Under the old 0.3 this
+        // was a 0.001 coin flip (2.304 vs 2.303); the tuned margin is 1.2.
+        let w = RankWeights::default();
+        assert_eq!(w.w_cat, 1.5, "retune via the train/held protocol, not by hand");
+        let mut same_tab = base_input();
+        same_tab.freq_base = 100;
+        same_tab.cat_boost = 1.0;
+        let mut cross_tab = base_input();
+        cross_tab.freq_base = 200;
+        cross_tab.cat_boost = 0.0;
+        assert!(score_candidate(&same_tab, &w) > score_candidate(&cross_tab, &w));
     }
 
     #[test]

@@ -2369,10 +2369,13 @@ mod tests {
         let via_parent = chained.suggest_no_neighbor_at("", "2276", "EN", 5, now);
         assert_eq!(bits(a.clone()), bits(via_parent), "parent-hit vs cold diverged");
         // Single-count pin: single-contributor rows score the quantized
-        // base (plan/05 #7): dequantize(quantize(2510)) + cat 1.0 + prefix
-        // 0.9 keyfit. A double-counted row would score +0.301 higher.
+        // base (plan/05 #7): dequantize(quantize(2510)) + w_cat * 1.0 +
+        // w_keyfit * 0.9. A double-counted row would score +0.301 higher.
+        // (Weights read from the default — this pins single-counting, not
+        // the tuned values.)
         assert_eq!(a.len(), 1);
-        let expect = dequantize_base(quantize_base(2510)) + 0.3 * 1.0 + 0.2 * 0.9;
+        let w = crate::rank::RankWeights::default();
+        let expect = dequantize_base(quantize_base(2510)) + w.w_cat * 1.0 + w.w_keyfit * 0.9;
         assert!(
             (a[0].score - expect).abs() < 1e-9,
             "freq must count once: got {} want {expect}",
