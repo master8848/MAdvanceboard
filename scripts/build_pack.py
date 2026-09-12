@@ -7,7 +7,8 @@ MVP pack format (what core-rust/pack.rs loads):
 Defaults in the Rust loader: freq->100, cat->pack id, lang->"en".
 `seq` is an explicit digit override for non-encodable display words
 (emoji, LaTeX); otherwise the T9 encoder derives it. `key` (emoji/math
-keyword) and `tr` (Nepali romanization hint) are ignored by the loader.
+keyword) is loader-opaque; `tr` (Nepali romanization) is first-class:
+the loader prefers `encode(tr)` over `encode(w)` (plan/03).
 
 Subcommands:
   build        txt/csv/wordlist -> pack JSON (freq assignment + T9 seq + validate)
@@ -82,9 +83,12 @@ def encode_word(word: str) -> str:
 
 
 def seq_for(entry: dict) -> str:
-    """Effective seq: explicit override wins, else keyword `key`, else encode(w)."""
+    """Effective seq: explicit override wins, else `encode(tr)` (Nepali
+    Roman transliteration, plan/03), else keyword `key`, else `encode(w)`."""
     if entry.get("seq"):
         return entry["seq"]
+    if entry.get("tr"):
+        return encode_word(entry["tr"])
     if entry.get("key"):
         return encode_word(entry["key"])
     return encode_word(entry.get("w", ""))
@@ -93,9 +97,12 @@ def seq_for(entry: dict) -> str:
 def ensure_seq(entry: dict) -> dict:
     """Materialize an explicit `seq` when the display word is not encodable
     (emoji, LaTeX) but a latin `key` is present. The Rust loader only honors
-    `seq` overrides, so the built JSON must carry it literally."""
+    `seq` overrides, so the built JSON must carry it literally.
+    `tr`-derived seqs are deliberately NOT materialized: the JSON keeps
+    `tr` so the loader (and per-layout re-encoding) derives them."""
     entry = dict(entry)
-    if not entry.get("seq") and not encode_word(entry.get("w", "")) and entry.get("key"):
+    if not entry.get("seq") and not entry.get("tr") \
+            and not encode_word(entry.get("w", "")) and entry.get("key"):
         entry["seq"] = encode_word(entry["key"])
     return entry
 
@@ -113,7 +120,8 @@ def zipf_freq(rank0: int, f0: float = 60000.0, alpha: float = 0.9,
 def parse_wordlist(path: Path):
     """Parse txt (one `word [freq]` per line, `#` comments) or csv (w,freq,...).
 
-    Returns list of dicts {w, freq?, cat?, lang?, seq?, key?, tr?}.
+    Returns list of dicts {w, freq?, cat?, lang?, seq?, key?, tr?, alt?}.
+    The `alt` column holds `;`-separated Roman spelling variants.
     """
     rows = []
     text = path.read_text(encoding="utf-8")
@@ -126,10 +134,18 @@ def parse_wordlist(path: Path):
             if not w or w.startswith("#"):
                 continue
             e = {"w": w}
-            for k in ("freq", "cat", "lang", "seq", "key", "tr"):
+            for k in ("freq", "cat", "lang", "seq", "key", "tr", "alt"):
                 v = (r.get(k) or "").strip()
-                if v:
-                    e[k] = int(v) if k == "freq" else v
+                if not v:
+                    continue
+                if k == "freq":
+                    e[k] = int(v)
+                elif k == "alt":
+                    alts = [x.strip() for x in v.split(";") if x.strip()]
+                    if alts:
+                        e[k] = alts
+                else:
+                    e[k] = v
             rows.append(e)
     else:
         for line in text.splitlines():
@@ -204,6 +220,19 @@ def validate_pack(pack: dict, path_name="pack") -> list:
         seen.add(key)
         if not seq_for(e):
             errs.append(f"{loc}: {w!r} encodes to empty seq")
+        # plan/03: `tr` is the primary seq source for Nepali rows; a `tr`
+        # that encodes empty (with no explicit `seq`) is a loud error, as
+        # is any empty `alt` variant.
+        if e.get("tr") and not e.get("seq") and not encode_word(e["tr"]):
+            errs.append(f"{loc}: {w!r} tr {e['tr']!r} encodes to empty seq")
+        alt = e.get("alt", [])
+        alts = alt.split(";") if isinstance(alt, str) else alt
+        if isinstance(alts, list):
+            for a in alts:
+                if not encode_word(a):
+                    errs.append(f"{loc}: {w!r} alt variant {a!r} encodes to empty seq")
+        elif alts:
+            errs.append(f"{loc}: {w!r} alt {alt!r} is not a list")
         f = e.get("freq", 100)
         if not isinstance(f, int) or not (1 <= f <= 1000000):
             errs.append(f"{loc}: freq {f!r} out of range 1..1e6")
@@ -217,11 +246,14 @@ def stats_of(pack: dict) -> dict:
     freqs = [e.get("freq", 100) for e in pack["words"]]
     explicit = sum(1 for e in pack["words"] if e.get("seq"))
     empties = sum(1 for e in pack["words"] if not seq_for(e))
+    with_tr = sum(1 for e in pack["words"] if e.get("tr"))
+    with_alt = sum(1 for e in pack["words"] if e.get("alt"))
     return {
         "id": pack.get("id"), "n": n,
         "freq_min": min(freqs) if freqs else 0,
         "freq_max": max(freqs) if freqs else 0,
         "explicit_seq": explicit, "empty_seq": empties,
+        "with_tr": with_tr, "with_alt": with_alt,
     }
 
 
