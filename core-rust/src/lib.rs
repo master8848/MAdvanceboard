@@ -1,0 +1,16 @@
+//! `kbcore`: 9-key T9 predictive text engine core (no Android deps).
+
+pub mod layout;
+pub mod mapping;
+pub mod pack;
+pub mod personal;
+pub mod predictor;
+pub mod rank;
+pub mod session;
+pub mod stack;
+
+pub use layout::{KeyMapping, LayoutRegistry, LayoutSpec, DEFAULT_LAYOUT_ID};
+pub use predictor::Predictor;
+pub use stack::{DictionaryStack, Suggestion};
+
+uniffi::setup_scaffolding!("kbcore");
