@@ -1559,11 +1559,16 @@ impl DictionaryStack {
 
     /// Fold one static row into the suggest union keyed by the row's
     /// precomputed `norm_key` (no `format!`/`to_lowercase` per match).
-    /// Frequencies sum, display follows the highest-priority row (ties to
-    /// the smallest row index — both scan and indexed paths pass true row
-    /// indexes, so the outcome is identical regardless of visit order),
-    /// keyfit takes the max, `seq` comes from the smallest contributing
-    /// row (what the legacy ascending scan stored first).
+    /// Frequencies sum ACROSS DISTINCT ROWS (alias rows encoding the same
+    /// word in separate rows), display follows the highest-priority row
+    /// (ties to the smallest row index — both scan and indexed paths pass
+    /// true row indexes, so the outcome is identical regardless of visit
+    /// order), keyfit takes the max, `seq` comes from the smallest
+    /// contributing row (what the legacy ascending scan stored first).
+    /// Callers merge each row index AT MOST ONCE per query with its best
+    /// keyfit: re-merging one row for a second matching seq would sum its
+    /// own frequency twice (phantom +0.3 score inflation observed on
+    /// multi-alias words, and cache-hit/cold disagreement).
     fn merge_row(
         merged: &mut HashMap<String, MergedRow>,
         idx: u32,
@@ -1615,9 +1620,13 @@ impl DictionaryStack {
     /// Indexed match (plan/05 #1-2 + cache #6): exact posting-list lookup,
     /// FST `StartsWith` prefix page, and generative 1-edit neighbor
     /// expansion through `neighbor_codes` (~50 lookups for 7-digit input).
-    /// Rows merge straight into the union — no intermediate hit
-    /// map, no second sort: [`Self::merge_row`] is insertion-order
-    /// independent, so FST-stream order needs no reordering.
+    /// Each phase records its hits into a per-row best-keyfit table and
+    /// every row index merges exactly once at the end ([`Self::merge_row`]
+    /// sums frequencies, so a second visit would double-count one entry —
+    /// the table keeps the max keyfit, matching the scan path's
+    /// match-any/best-keyfit rule). Insertion order into the union does not
+    /// matter: `merge_row` is order-independent, so the FST-stream order
+    /// needs no reordering.
     /// `opts.include_neighbor == false` skips generation (the gate's
     /// precision arm); `opts.include_prefix == false` skips the FST prefix
     /// page and cached prefix rows (the prefix-toggle experiment).
@@ -1646,6 +1655,10 @@ impl DictionaryStack {
             )
         });
         let key = (layout_id.to_string(), digits.to_string());
+        // Per-row best keyfit across exact/prefix/neighbor phases: each row
+        // index merges exactly once below, so multi-seq rows (primary +
+        // aliases) never sum their own frequency twice.
+        let mut hits: HashMap<u32, f64> = HashMap::new();
         // Path 1: exact cache hit — merge the memoized exact+prefix set.
         {
             let cache = self.prefix_cache.borrow();
@@ -1654,26 +1667,13 @@ impl DictionaryStack {
                     if tag != 1 && !opts.include_prefix {
                         continue;
                     }
-                    let e = self.row(idx);
-                    Self::merge_row(
-                        merged,
-                        idx,
-                        e,
-                        e.seq_for_layout(layout_id).to_string(),
-                        if tag == 1 { 1.0 } else { opts.prefix_keyfit },
-                    );
+                    Self::note_hit(&mut hits, idx, if tag == 1 { 1.0 } else { opts.prefix_keyfit });
                 }
                 drop(cache);
                 if opts.include_neighbor {
-                    self.merge_neighbors(
-                        digits,
-                        layout_id,
-                        mapping,
-                        postings,
-                        opts.neighbor_keyfit,
-                        merged,
-                    );
+                    self.merge_neighbors(digits, mapping, postings, opts.neighbor_keyfit, &mut hits);
                 }
+                self.merge_hits(layout_id, hits, merged);
                 return;
             }
             // Path 2: parent hit — exact+prefix matches only shrink as
@@ -1704,13 +1704,7 @@ impl DictionaryStack {
                         }
                         if let Some(t) = tag {
                             mine.push((idx, t));
-                            Self::merge_row(
-                                merged,
-                                idx,
-                                e,
-                                e.seq_for_layout(layout_id).to_string(),
-                                if t == 1 { 1.0 } else { opts.prefix_keyfit },
-                            );
+                            Self::note_hit(&mut hits, idx, if t == 1 { 1.0 } else { opts.prefix_keyfit });
                         }
                     }
                     drop(cache);
@@ -1721,15 +1715,9 @@ impl DictionaryStack {
                     }
                     cache.insert(key, mine);
                     if opts.include_neighbor {
-                        self.merge_neighbors(
-                            digits,
-                            layout_id,
-                            mapping,
-                            postings,
-                            opts.neighbor_keyfit,
-                            merged,
-                        );
+                        self.merge_neighbors(digits, mapping, postings, opts.neighbor_keyfit, &mut hits);
                     }
+                    self.merge_hits(layout_id, hits, merged);
                     return;
                 }
             }
@@ -1743,8 +1731,7 @@ impl DictionaryStack {
         let mut mine: Vec<(u32, u8)> = Vec::new();
         if let Some(rows) = postings.get(digits) {
             for &r in rows {
-                let e = self.row(r);
-                Self::merge_row(merged, r, e, e.seq_for_layout(layout_id).to_string(), 1.0);
+                Self::note_hit(&mut hits, r, 1.0);
                 mine.push((r, 1));
             }
         }
@@ -1760,14 +1747,12 @@ impl DictionaryStack {
                         }
                         if let Some(rows) = postings.get(s) {
                             for &r in rows {
-                                let e = self.row(r);
-                                Self::merge_row(
-                                    merged,
-                                    r,
-                                    e,
-                                    e.seq_for_layout(layout_id).to_string(),
-                                    opts.prefix_keyfit,
-                                );
+                                // Best-keyfit table (not a direct merge): a
+                                // row reachable via two prefix seqs (primary
+                                // + alias) records one hit, so its frequency
+                                // counts once. `mine` may hold (r,1)+(r,0);
+                                // the exact-first dedup below keeps tag 1.
+                                Self::note_hit(&mut hits, r, opts.prefix_keyfit);
                                 mine.push((r, 0));
                             }
                         }
@@ -1787,13 +1772,40 @@ impl DictionaryStack {
             cache.insert(key, mine);
         }
         if opts.include_neighbor {
-            self.merge_neighbors(
-                digits,
-                layout_id,
-                mapping,
-                postings,
-                opts.neighbor_keyfit,
+            self.merge_neighbors(digits, mapping, postings, opts.neighbor_keyfit, &mut hits);
+        }
+        self.merge_hits(layout_id, hits, merged);
+    }
+
+    /// Record one phase hit: keep the best keyfit per row index so the
+    /// row merges exactly once below.
+    fn note_hit(hits: &mut HashMap<u32, f64>, idx: u32, keyfit: f64) {
+        hits.entry(idx)
+            .and_modify(|k| {
+                if keyfit > *k {
+                    *k = keyfit;
+                }
+            })
+            .or_insert(keyfit);
+    }
+
+    /// Merge every hit row into the union exactly once with its best
+    /// keyfit. Iteration order over `hits` is irrelevant: `merge_row` is
+    /// insertion-order independent by construction.
+    fn merge_hits(
+        &self,
+        layout_id: &str,
+        hits: HashMap<u32, f64>,
+        merged: &mut HashMap<String, MergedRow>,
+    ) {
+        for (idx, keyfit) in hits {
+            let e = self.row(idx);
+            Self::merge_row(
                 merged,
+                idx,
+                e,
+                e.seq_for_layout(layout_id).to_string(),
+                keyfit,
             );
         }
     }
@@ -1801,17 +1813,18 @@ impl DictionaryStack {
     /// Generative 1-edit neighbor expansion: every single-code
     /// substitution to an adjacent key becomes an exact posting-list
     /// lookup (`len x ~8` lookups, zero per-entry allocs beyond the one
-    /// reused variant buffer). Hits merge at `neighbor_keyfit`
-    /// (`merge_row` keeps the max, so exact/prefix matches from other
-    /// phases win).
+    /// reused variant buffer). Hits record into the best-keyfit table
+    /// (never merged directly): exact/prefix phases already ran, and the
+    /// table keeps the max, so earlier stronger matches always win while a
+    /// row reachable via two neighbor variants still counts its frequency
+    /// once.
     fn merge_neighbors(
         &self,
         digits: &str,
-        layout_id: &str,
         mapping: &dyn KeyMapping,
         postings: &HashMap<String, Vec<u32>>,
         neighbor_keyfit: f64,
-        merged: &mut HashMap<String, MergedRow>,
+        hits: &mut HashMap<u32, f64>,
     ) {
         let mut variant = String::with_capacity(digits.len() + 1);
         for (i, c) in digits.char_indices() {
@@ -1822,14 +1835,7 @@ impl DictionaryStack {
                 variant.replace_range(i..i + c.len_utf8(), nc.encode_utf8(&mut nb));
                 if let Some(rows) = postings.get(variant.as_str()) {
                     for &r in rows {
-                        let e = self.row(r);
-                        Self::merge_row(
-                            merged,
-                            r,
-                            e,
-                            e.seq_for_layout(layout_id).to_string(),
-                            neighbor_keyfit,
-                        );
+                        Self::note_hit(hits, r, neighbor_keyfit);
                     }
                 }
             }
@@ -2080,6 +2086,58 @@ mod tests {
         // Invalid input yields an all-absent probe, never a panic.
         let bad = stack.probe_target_at("", "", "EN", "hello", 5, now, &opts);
         assert!(!bad.in_union && bad.top_rank.is_none());
+    }
+
+    #[test]
+    fn multi_seq_row_merges_once_on_every_cache_path() {
+        // One row whose primary AND alias both match a prefix (basnyat
+        // 2276928 + basnet 227638 under digits 2276) must merge exactly
+        // once: cold, parent-hit, and exact-hit paths return identical
+        // scores, and the frequency counts once. Regression test for the
+        // freq-doubling bug (same row re-merged per matching seq: phantom
+        // +0.3 score inflation on cold queries, cache-hit/cold
+        // disagreement).
+        let mk = || {
+            DictEntry::from_parts(
+                "basnyat".to_string(),
+                None,
+                None,
+                vec!["basnet".to_string()],
+                2510,
+                "EN".to_string(),
+                "en".to_string(),
+                0,
+            )
+            .unwrap()
+        };
+        let now = crate::personal::now_quantized();
+        let bits = |s: Vec<Suggestion>| {
+            s.into_iter().map(|x| (x.word, x.score.to_bits())).collect::<Vec<_>>()
+        };
+        // Repeat calls on one stack: cold, then exact-hit replays.
+        let stack = DictionaryStack::new(vec![mk()]);
+        let a = stack.suggest_no_neighbor_at("", "2276", "EN", 5, now);
+        let b = stack.suggest_no_neighbor_at("", "2276", "EN", 5, now);
+        let c = stack.suggest_no_neighbor_at("", "2276", "EN", 5, now);
+        assert_eq!(bits(a.clone()), bits(b.clone()), "cold vs exact-hit replay diverged");
+        assert_eq!(bits(b.clone()), bits(c), "replay instability");
+        // Typing chain (parent-hit path) vs cold query.
+        let chained = DictionaryStack::new(vec![mk()]);
+        for d in ["2", "22", "227"] {
+            chained.suggest_no_neighbor_at("", d, "EN", 5, now);
+        }
+        let via_parent = chained.suggest_no_neighbor_at("", "2276", "EN", 5, now);
+        assert_eq!(bits(a.clone()), bits(via_parent), "parent-hit vs cold diverged");
+        // Single-count pin: single-contributor rows score the quantized
+        // base (plan/05 #7): dequantize(quantize(2510)) + cat 1.0 + prefix
+        // 0.9 keyfit. A double-counted row would score +0.301 higher.
+        assert_eq!(a.len(), 1);
+        let expect = dequantize_base(quantize_base(2510)) + 0.3 * 1.0 + 0.2 * 0.9;
+        assert!(
+            (a[0].score - expect).abs() < 1e-9,
+            "freq must count once: got {} want {expect}",
+            a[0].score
+        );
     }
 
     #[test]
