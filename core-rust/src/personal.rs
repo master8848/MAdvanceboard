@@ -240,8 +240,7 @@ impl PersonalDict {
         self.entries.get(&key_of(word))
     }
 
-    /// Live (non-tombstone) personal entries, sorted by `(word, lang)` so
-    /// the suggest union consumes them in a deterministic order.
+    /// Live (non-tombstone) personal entries, sorted by `(word, lang)` so    /// the suggest union consumes them in a deterministic order.
     /// This is the personal-OOV index: learned QWERTY/OOV words with no
     /// static entry participate in `suggest` through this iterator.
     pub fn live_entries(&self) -> Vec<&PersonalEntry> {
@@ -262,6 +261,23 @@ impl PersonalDict {
             .unwrap_or(0);
         let p = self.prev_counts.get(&prev.to_lowercase()).copied().unwrap_or(0);
         (pw, p, BIGRAM_FIXED_VOCAB)
+    }
+
+    /// Learned followers of `prev`: `(word, count)` with count desc, then
+    /// word asc (deterministic). Backs the next-word connection surface
+    /// ([`crate::stack::DictionaryStack::suggest_next_at`]); empty when
+    /// `prev` was never committed before a word (cold-start = no data,
+    /// never a guess).
+    pub fn top_followers(&self, prev: &str) -> Vec<(String, u64)> {
+        let prev = prev.to_lowercase();
+        let mut v: Vec<(String, u64)> = self
+            .bigrams
+            .iter()
+            .filter(|((p, _), _)| *p == prev)
+            .map(|((_, w), c)| (w.clone(), *c))
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v
     }
 
     pub fn is_blocked(&self, word: &str) -> bool {
@@ -795,5 +811,24 @@ mod tests {
         let s = d.to_jsonl();
         let d2 = PersonalDict::from_jsonl(&s);
         assert_eq!(d2.get("hello").unwrap().count, 1);
+    }
+
+    #[test]
+    fn top_followers_rank_count_desc_word_asc() {
+        let mut d = PersonalDict::new();
+        assert!(d.top_followers("hello").is_empty());
+        d.record_bigram("hello", "zebra");
+        d.record_bigram("hello", "apple");
+        d.record_bigram("hello", "apple");
+        d.record_bigram("hi", "there");
+        assert_eq!(
+            d.top_followers("hello"),
+            vec![
+                ("apple".to_string(), 2),
+                ("zebra".to_string(), 1),
+            ]
+        );
+        assert_eq!(d.top_followers("hi").len(), 1);
+        assert!(d.top_followers("unknown").is_empty());
     }
 }

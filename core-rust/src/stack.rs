@@ -98,6 +98,14 @@ pub struct DictEntry {
     /// stay byte-identical.
     #[serde(default)]
     pub base_q: u16,
+    /// True for load-time inflection-sidecar rows
+    /// ([`crate::inflect::expand_entries`]): second-order expansion
+    /// (`runned` → `*runneds`) is suppressed structurally — synthetic rows
+    /// never serve as stems, so repeated `expand_inflections` calls mint
+    /// nothing. Defaults `false` (every constructor, every legacy
+    /// deserialized row); never part of scoring or merge identity.
+    #[serde(default)]
+    pub synthetic: bool,
 }
 
 impl DictEntry {
@@ -166,6 +174,7 @@ impl DictEntry {
                 seq_t916: String::new(),
                 norm_key: String::new(),
                 base_q: 0,
+                synthetic: false,
                 aliases: Vec::new(),
                 aliases_t916: Vec::new(),
             };
@@ -193,6 +202,7 @@ impl DictEntry {
             seq_t916: String::new(),
             norm_key: String::new(),
             base_q: 0,
+            synthetic: false,
             aliases: Vec::new(),
             aliases_t916: Vec::new(),
         };
@@ -260,6 +270,7 @@ impl DictEntry {
             seq_t916: String::new(),
             norm_key: String::new(),
             base_q: 0,
+            synthetic: false,
             aliases: Vec::new(),
             aliases_t916: Vec::new(),
         };
@@ -295,6 +306,7 @@ impl DictEntry {
             seq_t916: String::new(),
             norm_key: String::new(),
             base_q: 0,
+            synthetic: false,
             aliases: Vec::new(),
             aliases_t916: Vec::new(),
         };
@@ -663,6 +675,14 @@ fn cmp_scored(a: &Scored, b: &Scored) -> std::cmp::Ordering {
         .then_with(|| a.lang.cmp(&b.lang))
 }
 
+/// Next-word candidate returned by [`DictionaryStack::suggest_next_at`]:
+/// a personal-bigram follower of the committed previous word.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NextSuggestion {
+    pub word: String,
+    pub count: u64,
+    pub cat: String,
+}
 /// Scored candidate returned to the UI / UniFFI.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Suggestion {
@@ -2143,6 +2163,112 @@ impl DictionaryStack {
         }
     }
 
+    /// Load-time inflection sidecar (prototype, flag-gated): expand
+    /// in-vocab EN stems into discounted synthetic rows
+    /// ([`crate::inflect::expand_entries`]) and reindex. The call IS the
+    /// flag — default-constructed stacks never contain synthetic rows
+    /// (locked by `inflect_proto::flag_off_is_byte_identical`). Returns the
+    /// number of synthetic rows appended. Idempotence guard: a second call
+    /// with the same config adds nothing (minted forms now sit in the
+    /// vocab set), so repeated calls are safe but wasteful — call once.
+    pub fn expand_inflections(&mut self, cfg: &crate::inflect::InflectConfig) -> usize {
+        let vocab: std::collections::HashSet<String> = self
+            .base
+            .iter()
+            .chain(self.extensions.iter())
+            .map(|e| e.norm_key.clone())
+            .collect();
+        let mut rows =
+            crate::inflect::expand_entries(&self.base, &vocab, cfg);
+        let vocab2: std::collections::HashSet<String> = self
+            .extensions
+            .iter()
+            .map(|e| e.norm_key.clone())
+            .collect();
+        // Extensions expand against base+extensions vocab so cross-partition
+        // duplicates never mint (base forms were covered by `vocab` above;
+        // extension-vs-extension dupes merge via the union anyway, but
+        // minting them would double-count freq — suppress here).
+        let mut ext_vocab = vocab;
+        ext_vocab.extend(vocab2);
+        rows.extend(crate::inflect::expand_entries(&self.extensions, &ext_vocab, cfg));
+        let n = rows.len();
+        self.extensions.extend(rows);
+        self.rebuild_index();
+        n
+    }
+
+    /// Next-word connection surface (prototype): with NO digits typed yet,
+    /// rank the personal bigram followers of `ctx`'s last token by learned
+    /// count (desc, then word asc — deterministic). Empty ctx, unknown prev,
+    /// or `limit == 0` yields `[]`. Blocked words and other-tab rows are
+    /// excluded under the same isolation rule as suggest (plus the
+    /// `★personal` aggregate exception). This is a NEW surface: no existing
+    /// suggest path calls it, so it cannot move gate numbers by
+    /// construction (gate never queries empty digits — `suggest_inner`
+    /// returns `[]` there, unchanged).
+    pub fn suggest_next_at(
+        &self,
+        ctx: &str,
+        active_tab: &str,
+        limit: usize,
+        _now: i64,
+    ) -> Vec<NextSuggestion> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let prev = ctx.split_whitespace().last().unwrap_or("").to_lowercase();
+        if prev.is_empty() {
+            return Vec::new();
+        }
+        let tab = SuggestOpts::tab_key(active_tab);
+        let personal_tab = tab == "personal";
+        let mut out: Vec<NextSuggestion> = Vec::new();
+        for (word, count) in self.personal.top_followers(&prev) {
+            if out.len() >= limit {
+                break;
+            }
+            if self.personal.is_blocked(&word) {
+                continue;
+            }
+            // Category for isolation: the personal overlay first (the user
+            // may have re-learned a static word under another tab); else
+            // the highest-priority static row (a bigram-only follower the
+            // user typed but never unigram-learned keeps its pack tab);
+            // else the personal aggregate (true OOV).
+            let cat = match self.personal.get(&word) {
+                Some(e) if !e.category.is_empty() => e.category.clone(),
+                _ => self
+                    .static_cat(&word)
+                    .unwrap_or_else(|| "personal".to_string()),
+            };
+            if !(personal_tab || SuggestOpts::tab_key(&cat) == tab) {
+                continue;
+            }
+            out.push(NextSuggestion {
+                word,
+                count,
+                cat,
+            });
+        }
+        out.truncate(limit);
+        out
+    }
+
+    /// Highest-priority static `cat` for `word` (case-insensitive), or
+    /// `None` when no static row carries it. Backs next-word tab scoping
+    /// for bigram-only followers (typed in a pair, never unigram-learned).
+    fn static_cat(&self, word: &str) -> Option<String> {
+        let norm = word.to_lowercase();
+        let mut best: Option<(&str, i32)> = None;
+        for e in self.base.iter().chain(self.extensions.iter()) {
+            if e.word.to_lowercase() == norm && best.map(|b| e.priority > b.1).unwrap_or(true) {
+                best = Some((&e.cat, e.priority));
+            }
+        }
+        best.map(|b| b.0.to_string())
+    }
+
     /// Dictionary placement info for long-press popup:
     /// `pack cat • freq • accepts`.
     pub fn placement(&self, word: &str) -> Option<String> {
@@ -3165,5 +3291,60 @@ mod tests {
         stack.add_pack(&pack, 10);
         assert_eq!(stack.pack_layout_hint("NE"), Some("t9-16".to_string()));
         assert_eq!(stack.pack_layout_hint("EN"), None);
+    }
+
+    #[test]
+    fn next_word_cold_is_empty_never_a_guess() {
+        // No bigram history => no followers, even for in-vocab prev words.
+        // Cold-start connections are honest silence, not static guesses.
+        let stack = DictionaryStack::new(base());
+        let now = crate::personal::now_quantized();
+        assert!(stack.suggest_next_at("hello", "EN", 5, now).is_empty());
+        assert!(stack.suggest_next_at("", "EN", 5, now).is_empty());
+        assert!(stack.suggest_next_at("hello", "EN", 0, now).is_empty());
+    }
+
+    #[test]
+    fn next_word_ranks_learned_followers_by_count() {
+        let mut stack = DictionaryStack::new(base());
+        let now = crate::personal::now_quantized();
+        stack.personal.learn("hello", "EN");
+        stack.personal.learn("world", "EN");
+        stack.personal.record_bigram("hello", "world");
+        stack.personal.record_bigram("hello", "world");
+        stack.personal.record_bigram("hello", "hell");
+        let next = stack.suggest_next_at("hello", "EN", 5, now);
+        assert_eq!(next.len(), 2, "got {next:?}");
+        assert_eq!(next[0].word, "world");
+        assert_eq!(next[0].count, 2);
+        assert_eq!(next[1].word, "hell");
+        // Multi-word ctx uses the last token.
+        let next2 = stack.suggest_next_at("say hello", "EN", 5, now);
+        assert_eq!(next, next2);
+        // Limit truncates deterministically (count-desc order kept).
+        let top1 = stack.suggest_next_at("hello", "EN", 1, now);
+        assert_eq!(top1, vec![next[0].clone()]);
+    }
+
+    #[test]
+    fn next_word_respects_blocks_and_tabs() {
+        let mut stack = DictionaryStack::new(base());
+        let now = crate::personal::now_quantized();
+        stack.personal.learn("hello", "EN");
+        stack.personal.learn("world", "EN");
+        stack.personal.learn("dost", "NE");
+        stack.personal.record_bigram("hello", "world");
+        stack.personal.record_bigram("hello", "dost");
+        // Cross-tab follower hidden under EN …
+        let en = stack.suggest_next_at("hello", "EN", 5, now);
+        assert_eq!(en.iter().map(|n| n.word.as_str()).collect::<Vec<_>>(), ["world"]);
+        // … but visible under the ★personal aggregate.
+        let agg = stack.suggest_next_at("hello", "★personal", 5, now);
+        assert_eq!(agg.len(), 2);
+        // Blocked followers never surface.
+        stack.personal.forget("world");
+        assert!(stack.suggest_next_at("hello", "EN", 5, now).is_empty());
+        let agg2 = stack.suggest_next_at("hello", "★personal", 5, now);
+        assert_eq!(agg2.iter().map(|n| n.word.as_str()).collect::<Vec<_>>(), ["dost"]);
     }
 }
