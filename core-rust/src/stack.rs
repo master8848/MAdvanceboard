@@ -5,6 +5,7 @@
 //! the ranking formula, and returns the top-N.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,10 @@ use crate::rank::{base_term, dequantize_base, quantize_base, score_candidate_wit
 
 /// Layout ids with precomputed sequences (all current built-ins).
 pub const PRECOMPUTED_LAYOUTS: &[&str] = &["t9-9", "t9-12", "t9-16"];
+
+/// Prefix-result cache capacity (plan/05 #6): whole-word keystroke chains
+/// fit several times over; overflow clears (behavior-neutral).
+const PREFIX_CACHE_CAP: usize = 16;
 
 /// Static dictionary row (base or extension pack).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -458,6 +463,16 @@ pub struct DictionaryStack {
     /// backs exact-HashMap, generative-neighbor, and automaton-prefix
     /// lookups (plan/05 #1-2).
     seq_postings: HashMap<String, HashMap<String, Vec<u32>>>,
+    /// Prefix-result cache (plan/05 #6): `(layout_id, digits)` ->
+    /// exact+prefix `(row, keyfit-tag)` sets (`1` = exact, `0` = prefix).
+    /// Typing appends one digit, and exact+prefix matches only shrink, so
+    /// the next keystroke filters the parent's set instead of re-running
+    /// the FST page. Cap 16 (whole-word chains fit; overflow clears —
+    /// behavior-neutral, the cache never affects output, only speed).
+    /// Cleared on every index rebuild; personal rows never enter it.
+    /// `RefCell` because scoring is single-threaded (plan/04) and
+    /// `suggest` takes `&self`.
+    prefix_cache: RefCell<HashMap<(String, String), Vec<(u32, u8)>>>,
     /// FST build failures by layout (insert sets are sorted+deduped so
     /// this is only populated on genuine `fst` errors; surfaced via
     /// [`Self::fst_build_error`] instead of a silent missing index).
@@ -473,6 +488,7 @@ impl DictionaryStack {
             weights: RankWeights::default(),
             fst_by_layout: HashMap::new(),
             seq_postings: HashMap::new(),
+            prefix_cache: RefCell::new(HashMap::new()),
             fst_errors: HashMap::new(),
         };
         s.ensure_precomputed_all();
@@ -488,6 +504,7 @@ impl DictionaryStack {
             weights,
             fst_by_layout: HashMap::new(),
             seq_postings: HashMap::new(),
+            prefix_cache: RefCell::new(HashMap::new()),
             fst_errors: HashMap::new(),
         };
         s.ensure_precomputed_all();
@@ -642,6 +659,7 @@ impl DictionaryStack {
         self.fst_by_layout.clear();
         self.fst_errors.clear();
         self.seq_postings.clear();
+        self.prefix_cache.borrow_mut().clear();
         for layout in PRECOMPUTED_LAYOUTS {
             let mut seqs: Vec<&str> = self
                 .base
@@ -1311,13 +1329,20 @@ impl DictionaryStack {
         }
     }
 
-    /// Indexed match (plan/05 #1-2): exact posting-list lookup + FST
-    /// `StartsWith` prefix page + generative 1-edit neighbor expansion
-    /// (`len x neighbor_codes` exact lookups, ~50 for 7-digit input).
-    /// Rows merge straight into the union — no intermediate hit map, no
-    /// second sort: [`Self::merge_row`] is insertion-order independent, so
-    /// FST-stream order needs no reordering. `neighbor_on == false` skips
-    /// generation (the gate's precision arm).
+    /// Indexed match (plan/05 #1-2 + cache #6): exact posting-list lookup
+    /// + FST `StartsWith` prefix page + generative 1-edit neighbor
+    /// expansion (`len x neighbor_codes` exact lookups, ~50 for 7-digit
+    /// input). Rows merge straight into the union — no intermediate hit
+    /// map, no second sort: [`Self::merge_row`] is insertion-order
+    /// independent, so FST-stream order needs no reordering.
+    /// `neighbor_on == false` skips generation (the gate's precision arm).
+    ///
+    /// Prefix-result cache: exact+prefix row sets memoize per
+    /// `(layout_id, digits)` (cap 16, behavior-neutral). An exact hit
+    /// merges the set directly; a parent (`digits` minus one code) hit
+    /// filters the parent set with borrow-only keyfit checks instead of
+    /// re-running the FST page. Neighbors regenerate every keystroke
+    /// (cheap: `len x ~8` lookups) on all three paths.
     fn merge_indexed(
         &self,
         digits: &str,
@@ -1332,14 +1357,88 @@ impl DictionaryStack {
                  (guard with seq_postings.contains_key)"
             )
         });
-        // (row, best keyfit): exact 1.0, prefix 0.9, neighbor 0.6. Phases
-        // run exact-first so the common top hit never waits on the prefix
-        // page; `merge_row` takes the max keyfit, so phase order cannot
-        // change the result.
+        let key = (layout_id.to_string(), digits.to_string());
+        // Path 1: exact cache hit — merge the memoized exact+prefix set.
+        {
+            let cache = self.prefix_cache.borrow();
+            if let Some(rows) = cache.get(&key) {
+                for &(idx, tag) in rows.iter() {
+                    let e = self.row(idx);
+                    Self::merge_row(
+                        merged,
+                        idx,
+                        e,
+                        e.seq_for_layout(layout_id).to_string(),
+                        if tag == 1 { 1.0 } else { 0.9 },
+                    );
+                }
+                drop(cache);
+                if neighbor_on {
+                    self.merge_neighbors(digits, layout_id, mapping, postings, merged);
+                }
+                return;
+            }
+            // Path 2: parent hit — exact+prefix matches only shrink as
+            // digits grow, so filter the parent set with borrow-only
+            // checks (no FST page, no encodes).
+            if let Some(parent) = digits.get(..digits.len().saturating_sub(1)) {
+                let pkey = (layout_id.to_string(), parent.to_string());
+                if let Some(parent_rows) = cache.get(&pkey) {
+                    let mut mine: Vec<(u32, u8)> = Vec::new();
+                    for &(idx, _) in parent_rows.iter() {
+                        let e = self.row(idx);
+                        let mut tag: Option<u8> = None;
+                        let primary = e.seq_for_layout(layout_id);
+                        if primary == digits {
+                            tag = Some(1);
+                        } else if primary.starts_with(digits) {
+                            tag = Some(0);
+                        }
+                        if tag != Some(1) {
+                            for a in e.aliases_for_layout(layout_id) {
+                                if a.as_str() == digits {
+                                    tag = Some(1);
+                                    break;
+                                } else if a.starts_with(digits) {
+                                    tag = tag.or(Some(0));
+                                }
+                            }
+                        }
+                        if let Some(t) = tag {
+                            mine.push((idx, t));
+                            Self::merge_row(
+                                merged,
+                                idx,
+                                e,
+                                e.seq_for_layout(layout_id).to_string(),
+                                if t == 1 { 1.0 } else { 0.9 },
+                            );
+                        }
+                    }
+                    drop(cache);
+                    mine.sort_unstable();
+                    let mut cache = self.prefix_cache.borrow_mut();
+                    if cache.len() >= PREFIX_CACHE_CAP {
+                        cache.clear();
+                    }
+                    cache.insert(key, mine);
+                    if neighbor_on {
+                        self.merge_neighbors(digits, layout_id, mapping, postings, merged);
+                    }
+                    return;
+                }
+            }
+        }
+        // Path 3: cold — exact lookup + FST prefix page, recording the
+        // exact+prefix set for the cache. Phases run exact-first so the
+        // common top hit never waits on the prefix page; `merge_row`
+        // takes the max keyfit, so phase order cannot change the result.
+        let mut mine: Vec<(u32, u8)> = Vec::new();
         if let Some(rows) = postings.get(digits) {
             for &r in rows {
                 let e = self.row(r);
                 Self::merge_row(merged, r, e, e.seq_for_layout(layout_id).to_string(), 1.0);
+                mine.push((r, 1));
             }
         }
         if let Some(set) = self.fst_by_layout.get(layout_id) {
@@ -1361,30 +1460,52 @@ impl DictionaryStack {
                                 e.seq_for_layout(layout_id).to_string(),
                                 0.9,
                             );
+                            mine.push((r, 0));
                         }
                     }
                 }
             }
         }
+        // One row can contribute an exact seq and a prefix seq (primary +
+        // alias): sort exact-first per row, dedupe keeping the exact tag.
+        mine.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+        mine.dedup_by(|a, b| a.0 == b.0);
+        {
+            let mut cache = self.prefix_cache.borrow_mut();
+            if cache.len() >= PREFIX_CACHE_CAP {
+                cache.clear();
+            }
+            cache.insert(key, mine);
+        }
         if neighbor_on {
-            let mut variant = String::with_capacity(digits.len() + 1);
-            for (i, c) in digits.char_indices() {
-                for nc in mapping.neighbor_codes(c) {
-                    variant.clear();
-                    variant.push_str(digits);
-                    let mut nb = [0u8; 4];
-                    variant.replace_range(i..i + c.len_utf8(), nc.encode_utf8(&mut nb));
-                    if let Some(rows) = postings.get(variant.as_str()) {
-                        for &r in rows {
-                            let e = self.row(r);
-                            Self::merge_row(
-                                merged,
-                                r,
-                                e,
-                                e.seq_for_layout(layout_id).to_string(),
-                                0.6,
-                            );
-                        }
+            self.merge_neighbors(digits, layout_id, mapping, postings, merged);
+        }
+    }
+
+    /// Generative 1-edit neighbor expansion: every single-code
+    /// substitution to an adjacent key becomes an exact posting-list
+    /// lookup (`len x ~8` lookups, zero per-entry allocs beyond the one
+    /// reused variant buffer). Hits merge at keyfit 0.6 (`merge_row`
+    /// keeps the max, so exact/prefix matches from other phases win).
+    fn merge_neighbors(
+        &self,
+        digits: &str,
+        layout_id: &str,
+        mapping: &dyn KeyMapping,
+        postings: &HashMap<String, Vec<u32>>,
+        merged: &mut HashMap<String, MergedRow>,
+    ) {
+        let mut variant = String::with_capacity(digits.len() + 1);
+        for (i, c) in digits.char_indices() {
+            for nc in mapping.neighbor_codes(c) {
+                variant.clear();
+                variant.push_str(digits);
+                let mut nb = [0u8; 4];
+                variant.replace_range(i..i + c.len_utf8(), nc.encode_utf8(&mut nb));
+                if let Some(rows) = postings.get(variant.as_str()) {
+                    for &r in rows {
+                        let e = self.row(r);
+                        Self::merge_row(merged, r, e, e.seq_for_layout(layout_id).to_string(), 0.6);
                     }
                 }
             }
@@ -1500,6 +1621,40 @@ mod tests {
         lex.sort();
         assert_eq!(all[0].word, lex[0]);
         assert_eq!(all[199].word, lex[199]);
+    }
+
+    #[test]
+    fn prefix_cache_typing_chain_matches_fresh_queries() {
+        // Plan/05 #6: sequential keystrokes ("4".."43556") populate and
+        // filter the prefix cache; every chained result must equal the
+        // same query on a cold index, under both neighbor arms and every
+        // built-in layout.
+        let stack = DictionaryStack::new(base());
+        let reg = LayoutRegistry::with_builtins();
+        let now = crate::personal::now_quantized();
+        for layout_id in ["t9-9", "t9-12", "t9-16"] {
+            let mapping = reg.get_or_default(layout_id).clone();
+            // Digits valid under each layout's own code set.
+            let chain: &[&str] = match layout_id {
+                "t9-16" => &["4", "43", "435", "4355", "43556"],
+                _ => &["4", "43", "435", "4355", "43556"],
+            };
+            for digits in chain {
+                let chained = stack.suggest_for_layout_at("", digits, &mapping, "EN", 5, now);
+                let chained_off =
+                    stack.suggest_for_layout_no_neighbor_at("", digits, &mapping, "EN", 5, now);
+                // Fresh stack = cold cache: identical rows must come back.
+                let fresh = DictionaryStack::new(base());
+                let expect = fresh.suggest_for_layout_at("", digits, &mapping, "EN", 5, now);
+                let expect_off =
+                    fresh.suggest_for_layout_no_neighbor_at("", digits, &mapping, "EN", 5, now);
+                let words = |s: Vec<Suggestion>| {
+                    s.into_iter().map(|x| (x.word, x.score.to_bits())).collect::<Vec<_>>()
+                };
+                assert_eq!(words(chained), words(expect), "chain {layout_id} {digits}");
+                assert_eq!(words(chained_off), words(expect_off), "chain-off {layout_id} {digits}");
+            }
+        }
     }
 
     #[test]
