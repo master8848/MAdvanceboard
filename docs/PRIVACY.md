@@ -36,6 +36,25 @@ is an explicit user action that bumps `ts`.
 
 ## Incognito / what stays local
 
+- **Incognito** (system `IME_FLAG_NO_PERSONALIZED_LEARNING` /
+  `privateImeOptions`, manual 🎭 mask-key toggle, or automatic in
+  password fields): no `learn`/`record_reject`/`record_bigram`, no
+  session `log_accepted`/`log_rejected`, no clipboard capture. The
+  snippet buffer, candidates, and the visible clipboard clear on entry
+  (persisted clipboard history is HIDDEN, not deleted, until exit); the
+  snippet buffer clears again on exit (no TTL carryover either way).
+  Visual: dark suggestion strip + 🎭 badge + "Incognito — nothing
+  saved" banner. The manual flag is never persisted (always starts OFF
+  unless the app requests incognito).
+- **Clipboard history** (7-day default, Settings → Clipboard presets
+  `1h / 24h / 7d / 30d` + custom hours): on-device only in
+  `kb_clipboard_prefs` (cleared on uninstall), RAM-first, TTL-enforced
+  on every keyboard start and every capture (no background worker).
+  Pinned items persist until unpinned/deleted; unpinned cap 100 (ring),
+  item cap 5k chars. Pastes commit raw — never learned, never logged.
+  Password-field and incognito copies are never stored, never shown.
+  Clipboard items are excluded from sync/export files.
+
 - Learning lives in on-device storage (SQLite via `core-rust`
   `rusqlite` bundled, WAL + hourly compact). It never leaves the device
   unless you export.
