@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::layout::{KeyMapping, DEFAULT_LAYOUT_ID};
 use crate::mapping::{encode_word, is_one_edit_neighbor};
 use crate::pack::PackFile;
-use crate::personal::{now_ts, PersonalDict};
+use crate::personal::{now_quantized, PersonalDict};
 use crate::rank::{score_candidate, RankInput, RankWeights};
 
 /// Static dictionary row (base or extension pack).
@@ -230,6 +230,20 @@ impl DictionaryStack {
         active_tab: &str,
         limit: usize,
     ) -> Vec<Suggestion> {
+        self.suggest_at(ctx, digits, active_tab, limit, now_quantized())
+    }
+
+    /// Deterministic entry point: same `(dict set, ctx, digits, tab,
+    /// layout, personal snapshot, now)` => byte-identical output.
+    /// `now` should be a 1h-quantized timestamp (`personal::quantize_ts`).
+    pub fn suggest_at(
+        &self,
+        ctx: &str,
+        digits: &str,
+        active_tab: &str,
+        limit: usize,
+        now: i64,
+    ) -> Vec<Suggestion> {
         // Frozen t9-9 path: stored seqs, global neighbor graph, digits only.
         self.suggest_inner(
             ctx,
@@ -240,6 +254,41 @@ impl DictionaryStack {
             &|e| e.seq.clone(),
             &is_one_edit_neighbor,
             &|c| c.is_ascii_digit(),
+            now,
+        )
+    }
+
+    /// Exact + prefix only (neighbor OFF): the gate's precision arm.
+    /// Same quantization contract as [`Self::suggest_at`].
+    pub fn suggest_no_neighbor(
+        &self,
+        ctx: &str,
+        digits: &str,
+        active_tab: &str,
+        limit: usize,
+    ) -> Vec<Suggestion> {
+        self.suggest_no_neighbor_at(ctx, digits, active_tab, limit, now_quantized())
+    }
+
+    /// Neighbor-OFF deterministic entry point (see [`Self::suggest_at`]).
+    pub fn suggest_no_neighbor_at(
+        &self,
+        ctx: &str,
+        digits: &str,
+        active_tab: &str,
+        limit: usize,
+        now: i64,
+    ) -> Vec<Suggestion> {
+        self.suggest_inner(
+            ctx,
+            digits,
+            active_tab,
+            limit,
+            DEFAULT_LAYOUT_ID,
+            &|e| e.seq.clone(),
+            &|_, _| false,
+            &|c| c.is_ascii_digit(),
+            now,
         )
     }
 
@@ -254,6 +303,19 @@ impl DictionaryStack {
         mapping: &dyn KeyMapping,
         active_tab: &str,
         limit: usize,
+    ) -> Vec<Suggestion> {
+        self.suggest_for_layout_at(ctx, digits, mapping, active_tab, limit, now_quantized())
+    }
+
+    /// Deterministic per-layout entry point (see [`Self::suggest_at`]).
+    pub fn suggest_for_layout_at(
+        &self,
+        ctx: &str,
+        digits: &str,
+        mapping: &dyn KeyMapping,
+        active_tab: &str,
+        limit: usize,
+        now: i64,
     ) -> Vec<Suggestion> {
         self.suggest_inner(
             ctx,
@@ -274,6 +336,40 @@ impl DictionaryStack {
             },
             &|a, b| mapping.is_one_edit_neighbor(a, b),
             &|c| mapping.contains_code(c),
+            now,
+        )
+    }
+
+    /// Per-layout neighbor-OFF deterministic entry point.
+    pub fn suggest_for_layout_no_neighbor_at(
+        &self,
+        ctx: &str,
+        digits: &str,
+        mapping: &dyn KeyMapping,
+        active_tab: &str,
+        limit: usize,
+        now: i64,
+    ) -> Vec<Suggestion> {
+        self.suggest_inner(
+            ctx,
+            digits,
+            active_tab,
+            limit,
+            mapping.layout_id(),
+            &|e| {
+                if e.explicit {
+                    return e.seq.clone();
+                }
+                let s = mapping.encode_word(&e.word);
+                if s.is_empty() {
+                    e.seq.clone()
+                } else {
+                    s
+                }
+            },
+            &|_, _| false,
+            &|c| mapping.contains_code(c),
+            now,
         )
     }
 
@@ -288,12 +384,12 @@ impl DictionaryStack {
         seq_of: &dyn Fn(&DictEntry) -> String,
         is_neighbor_edit: &dyn Fn(&str, &str) -> bool,
         is_code: &dyn Fn(char) -> bool,
+        now: i64,
     ) -> Vec<Suggestion> {
         if digits.is_empty() || !digits.chars().all(is_code) || limit == 0 {
             return Vec::new();
         }
         let prev = ctx.split_whitespace().last().unwrap_or("").to_lowercase();
-        let now = now_ts();
 
         struct Merged {
             word: String,

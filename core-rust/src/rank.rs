@@ -49,6 +49,8 @@ pub fn base_term(freq_base: u64, freq_personal: u64) -> f64 {
 }
 
 /// `exp(-dt / 7d)` since last accept; 0 when never accepted.
+/// Callers must pass a 1h-quantized `now_ts` (see `personal::quantize_ts`)
+/// so scores are stable within the hour and never flap per-second.
 pub fn recency_term(now_ts: i64, last_seen_ts: i64) -> f64 {
     if last_seen_ts <= 0 {
         return 0.0;
