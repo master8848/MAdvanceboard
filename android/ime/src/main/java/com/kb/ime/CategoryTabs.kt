@@ -2,7 +2,7 @@ package com.kb.ime
 
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.PrimaryScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -29,7 +29,7 @@ fun CategoryTabs(
     modifier: Modifier = Modifier
 ) {
     Row(modifier = modifier.fillMaxWidth()) {
-        ScrollableTabRow(
+        PrimaryScrollableTabRow(
             selectedTabIndex = selected,
             modifier = Modifier.weight(1f),
             edgePadding = 0.dp
