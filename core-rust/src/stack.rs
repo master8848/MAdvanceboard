@@ -403,18 +403,23 @@ impl DictionaryStack {
 
         // Union across base + extensions, keyed by (norm word, lang).
         let mut merged: HashMap<String, Merged> = HashMap::new();
+        let keyfit_of = |eseq: &str| -> Option<f64> {
+            if eseq == digits {
+                Some(1.0)
+            } else if eseq.starts_with(digits) {
+                Some(0.9)
+            } else if is_neighbor_edit(digits, eseq) {
+                Some(0.6)
+            } else {
+                None
+            }
+        };
         for e in self.base.iter().chain(self.extensions.iter()) {
             let eseq = seq_of(e);
             if eseq.is_empty() {
                 continue;
             }
-            let keyfit = if eseq == digits {
-                1.0
-            } else if eseq.starts_with(digits) {
-                0.9
-            } else if is_neighbor_edit(digits, &eseq) {
-                0.6
-            } else {
+            let Some(keyfit) = keyfit_of(&eseq) else {
                 continue;
             };
             let norm = format!("{}\x1f{}", e.word.to_lowercase(), e.lang);
@@ -447,9 +452,59 @@ impl DictionaryStack {
             }
         }
 
-        // Personal-only (OOV learned) words also participate.
-        // (Accessed via a JSONL round-trip-free direct path is internal;
-        // here we score them through the same pipeline below.)
+        // Personal-OOV index: learned words with no static entry (QWERTY /
+        // OOV commits) participate through the same pipeline. Entries whose
+        // (norm, lang) collides with a static candidate merge (keyfit max,
+        // never a duplicate row); the personal overlay below still supplies
+        // freq_personal / recency / bigram.
+        for p in self.personal.live_entries() {
+            // Frozen t9-9 path reads `seq` verbatim, so pre-encode with the
+            // default T9 mapping; per-layout paths ignore `seq` for
+            // non-explicit entries and re-encode under their own mapping.
+            let tmp = DictEntry {
+                word: p.word.clone(),
+                seq: encode_word(&p.word),
+                freq: 0,
+                cat: p.category.clone(),
+                lang: p.lang.clone(),
+                priority: 100,
+                explicit: false,
+            };
+            let eseq = seq_of(&tmp);
+            if eseq.is_empty() {
+                continue;
+            }
+            let Some(keyfit) = keyfit_of(&eseq) else {
+                continue;
+            };
+            let norm = format!("{}\x1f{}", p.word.to_lowercase(), p.lang);
+            match merged.get_mut(&norm) {
+                Some(m) => {
+                    if keyfit > m.keyfit {
+                        m.keyfit = keyfit;
+                    }
+                }
+                None => {
+                    merged.insert(
+                        norm,
+                        Merged {
+                            word: p.word.clone(),
+                            seq: eseq,
+                            freq_base: 0,
+                            cat: if p.category.is_empty() {
+                                "personal".to_string()
+                            } else {
+                                p.category.clone()
+                            },
+                            lang: p.lang.clone(),
+                            priority: 100,
+                            keyfit,
+                        },
+                    );
+                }
+            }
+        }
+
         struct Scored {
             word: String,
             seq: String,
@@ -572,6 +627,38 @@ mod tests {
                 {"w":"help","freq":200,"cat":"EN"}]"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn personal_oov_participates_in_suggest() {
+        let mut stack = DictionaryStack::new(base());
+        // "qzx" -> 799 matches no static entry (hello 43556, hell 4355, ...).
+        assert!(stack
+            .suggest("", "799", "EN", 5)
+            .iter()
+            .all(|c| c.word != "qzx"));
+        stack.personal.learn("qzx", "EN");
+        stack.personal.learn("qzx", "EN");
+        let s = stack.suggest("", "799", "EN", 5);
+        assert!(
+            s.iter().any(|c| c.word == "qzx"),
+            "learned OOV must suggest, got {:?}",
+            s.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn personal_alias_merges_never_duplicates() {
+        let mut stack = DictionaryStack::new(base());
+        stack.personal.learn("HELLO", "EN");
+        stack.personal.learn("HELLO", "EN");
+        let s = stack.suggest("", "43556", "EN", 5);
+        assert_eq!(
+            s.iter().filter(|c| c.word.to_lowercase() == "hello").count(),
+            1,
+            "alias must merge into one row"
+        );
+        assert_eq!(s[0].word.to_lowercase(), "hello");
     }
 
     #[test]

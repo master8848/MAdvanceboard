@@ -13,6 +13,12 @@ pub const PERSONAL_CAP: usize = 10_000;
 pub struct PersonalEntry {
     pub word: String,
     pub category: String,
+    /// Dedupe language for the suggest union key `(norm(word), lang)`.
+    /// Derived deterministically from `category` on learn/load
+    /// (`NE` -> `ne`, else `en`); old JSONL lines without it default to
+    /// `en`. Not stored in SQLite (recomputed from `category` on load).
+    #[serde(default = "default_lang")]
+    pub lang: String,
     pub count: u64,
     pub acc: u64,
     pub rej: u64,
@@ -22,6 +28,19 @@ pub struct PersonalEntry {
     /// `deleted` so JSONL blobs and call sites are untouched.
     #[serde(rename = "del", alias = "deleted")]
     pub deleted: bool,
+}
+
+fn default_lang() -> String {
+    "en".to_string()
+}
+
+/// Deterministic category -> dedupe-lang rule (only `en`/`ne` exist today).
+fn lang_of_category(category: &str) -> String {
+    if category.eq_ignore_ascii_case("ne") {
+        "ne".to_string()
+    } else {
+        "en".to_string()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -100,6 +119,7 @@ impl PersonalDict {
                 e.deleted = false;
                 if !category.is_empty() {
                     e.category = category.to_string();
+                    e.lang = lang_of_category(category);
                 }
             }
             None => {
@@ -108,6 +128,7 @@ impl PersonalDict {
                     PersonalEntry {
                         word: word.to_string(),
                         category: category.to_string(),
+                        lang: lang_of_category(category),
                         count: 1,
                         acc: 1,
                         rej: 0,
@@ -137,6 +158,7 @@ impl PersonalDict {
                     PersonalEntry {
                         word: word.to_string(),
                         category: String::new(),
+                        lang: default_lang(),
                         count: 0,
                         acc: 0,
                         rej: 0,
@@ -161,6 +183,7 @@ impl PersonalDict {
                 PersonalEntry {
                     word: word.to_string(),
                     category: String::new(),
+                    lang: default_lang(),
                     count: 0,
                     acc: 0,
                     rej: 1,
@@ -182,6 +205,17 @@ impl PersonalDict {
 
     pub fn get(&self, word: &str) -> Option<&PersonalEntry> {
         self.entries.get(&key_of(word))
+    }
+
+    /// Live (non-tombstone) personal entries, sorted by `(word, lang)` so
+    /// the suggest union consumes them in a deterministic order.
+    /// This is the personal-OOV index: learned QWERTY/OOV words with no
+    /// static entry participate in `suggest` through this iterator.
+    pub fn live_entries(&self) -> Vec<&PersonalEntry> {
+        let mut v: Vec<&PersonalEntry> =
+            self.entries.values().filter(|e| !e.deleted).collect();
+        v.sort_by(|a, b| a.word.cmp(&b.word).then_with(|| a.lang.cmp(&b.lang)));
+        v
     }
 
     /// `(count(prev,w), count(prev), V)`.
@@ -373,11 +407,15 @@ impl PersonalDict {
             for row in rows {
                 let (k, word, category, count, acc, rej, last_seen, deleted) =
                     row.map_err(|e| e.to_string())?;
+                // `lang` is not a SQLite column (schema frozen); recompute
+                // it deterministically from `category` (same rule as learn).
+                let lang = lang_of_category(&category);
                 d.entries.insert(
                     k,
                     PersonalEntry {
                         word,
                         category,
+                        lang,
                         count: count.max(0) as u64,
                         acc: acc.max(0) as u64,
                         rej: rej.max(0) as u64,
