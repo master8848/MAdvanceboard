@@ -94,7 +94,7 @@ data class CategoryGesturePolicy(
  * `words`, `ne`, `numbers`, `emoji`, `js`) on [layoutId]
  * (`t9-9` / `t9-12` / `t9-16`, see plan 02 ids).
  *
- * Never throws for unknown categories: unknown ids resolve to the EN/NE
+ * Never throws for unknown categories: unknown ids resolve to the General/NE
  * default policy and the fallback is recorded in [CategoryGesturePolicy.disabledReason]
  * only when a gesture is actually disabled, so callers can surface it.
  */

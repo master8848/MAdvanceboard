@@ -1654,7 +1654,7 @@ class KbInputMethodService : InputMethodService() {
         activeAssetId = canonicalTabId(tabLabel)
         liveTabLabel = activeAssetId
         // Snippet buffer dies on tab switch (plan 12:62): helpers belong to
-        // one tab's document scratch — switching to EN hides the js strip,
+        // one tab's document scratch — switching to General hides the js strip,
         // and coming back later finds it gone. The new tab's static palette
         // (html/math) appears via the refresh at the end of this function.
         snippetBuffer.clear()
@@ -1690,17 +1690,12 @@ class KbInputMethodService : InputMethodService() {
     }
 
     /**
-     * Canonical asset id for a tab label (legacy display labels `EN`/`NE`
-     * still map). Shared by tap select and long-press placement so both
-     * resolve identically.
+     * Canonical asset id for a tab label. The tab strip shows UI labels
+     * ([CategoryLabels]: `words` renders as "General"); the legacy display
+     * labels `EN`/`NE` still map. Shared by tap select and long-press
+     * placement so both resolve identically.
      */
-    internal fun canonicalTabId(tabLabel: String): String = when (tabLabel) {
-        "EN" -> "words"
-        "NE" -> "ne"
-        "nepali" -> "ne" // legacy manifest id (renamed to `ne`)
-        "★personal" -> "personal"
-        else -> tabLabel.lowercase()
-    }
+    internal fun canonicalTabId(tabLabel: String): String = CategoryLabels.canonicalId(tabLabel)
 
     /**
      * Long-press on a tab (plan/08): opens the placement popup for that

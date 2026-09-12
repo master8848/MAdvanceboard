@@ -12,7 +12,7 @@ package com.kb.ime
  *
  * | case                  | learnNow | snippetNow |
  * |-----------------------|----------|------------|
- * | normal EN/NE/js       | true     | true       |
+ * | normal General/NE/js  | true     | true       |
  * | numbers tab           | false    | false      |
  * | math tab              | false    | true       |
  * | password field        | false    | false      |

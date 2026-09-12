@@ -31,7 +31,7 @@ object LayoutStore {
     /** Category ids shown in Settings (asset ids; see [DEFAULT_CATEGORIES]). */
     val KNOWN_CATS: List<Pair<String, String>> = listOf(
         "numbers" to "numbers",
-        "words" to "EN",
+        "words" to CategoryLabels.WORDS_LABEL,
         "ne" to "NE",
         "js" to "js",
         "rust" to "rust",

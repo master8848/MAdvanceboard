@@ -405,7 +405,8 @@ fun PlacementPopup(
     Card(modifier = modifier.fillMaxWidth().padding(8.dp)) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                text = "Placement — ${state.tab}",
+                // Engine id stays internal; humans see "General".
+                text = "Placement — ${CategoryLabels.label(state.tab)}",
                 style = MaterialTheme.typography.titleSmall
             )
             Text(

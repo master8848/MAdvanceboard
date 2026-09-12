@@ -106,7 +106,8 @@ fun CategoryTabs(
                 Tab(
                     selected = index == selected,
                     onClick = { onSelect(index) },
-                    text = { Text(cat) },
+                    // Engine id stays `words`; humans see "General".
+                    text = { Text(CategoryLabels.label(cat)) },
                     modifier = Modifier.pointerInput(cat) {
                         detectTapGestures(
                             onLongPress = { latestOnTabLongPress(cat) }

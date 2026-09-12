@@ -64,7 +64,7 @@ fun SettingsScreen() {
     ) {
         Text("9-Key Keyboard Settings", style = MaterialTheme.typography.headlineSmall)
         Text("Tuning (advanced weights TBD)", modifier = Modifier.padding(top = 16.dp))
-        Text("Packs: en-base, ne-base, numbers, js, rust, html, emoji, math")
+        Text("Packs: General (words), NE (ne), numbers, js, rust, html, emoji, math")
         Switch(
             checked = optedIn,
             onCheckedChange = { value ->
@@ -88,7 +88,7 @@ fun SettingsScreen() {
 
 /**
  * Settings → Layout (plan 02): global default (t9-9 / t9-12 / t9-16) plus
- * the per-tab override list (e.g. EN→t9-9, NE→t9-16). Persisted by
+ * the per-tab override list (e.g. General→t9-9, NE→t9-16). Persisted by
  * [LayoutStore] (same prefs file the IME service resolves per
  * `active_tab`); changing a layout takes effect on the next tab switch
  * or field start — labels re-encode from the newly loaded spec.

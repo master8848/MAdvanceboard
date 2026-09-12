@@ -71,7 +71,8 @@ object BuiltinPacks {
         "emoji" to "Emoji",
         "math" to "Math",
         "medical" to "Medical",
-        "words" to "EN",
+        // Engine id `words`; UI label only (see [CategoryLabels]).
+        "words" to CategoryLabels.WORDS_LABEL,
         "ne" to "NE",
         "personal" to "★personal"
     )
@@ -192,7 +193,7 @@ object DictStackOrder {
         val out = mutableListOf<StackSlot>()
         out.add(
             StackSlot(
-                "words", "EN (base)", BuiltinPacks.BASE_PRIORITY, true,
+                "words", "${CategoryLabels.WORDS_LABEL} (base)", BuiltinPacks.BASE_PRIORITY, true,
                 fixed = true, custom = false, learns = true,
                 layoutId = layoutBadge("words")
             )
