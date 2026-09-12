@@ -249,7 +249,8 @@ class KbInputMethodService : InputMethodService() {
         reloadGesturePrefs()
         val gate = AccessibilityGates.evaluate(this)
         flingsAllowedAT = gate.flingsAllowed
-        if (gate.reason != null && !gate.flingsAllowed) gestureError = gate.reason
+        // Fresh input view: AT status is authoritative; stale errors clear.
+        gestureError = if (!gate.flingsAllowed) gate.reason else null
     }
 
     override fun onFinishInput() {

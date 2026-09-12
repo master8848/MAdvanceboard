@@ -4,7 +4,6 @@ import android.os.Handler
 import android.os.Looper
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
-import android.view.VelocityTracker
 import android.view.View
 
 /**
@@ -71,7 +70,6 @@ class PadGestureDetector(
 
     private val density: Float get() = host.resources.displayMetrics.density
     private val handler = Handler(Looper.getMainLooper())
-    private var tracker: VelocityTracker? = null
     private var downX = 0f
     private var downY = 0f
     private var downT = 0L
@@ -114,8 +112,6 @@ class PadGestureDetector(
         lastY = ev.y
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                tracker?.recycle()
-                tracker = VelocityTracker.obtain().also { it.addMovement(ev) }
                 downX = ev.x
                 downY = ev.y
                 downT = ev.eventTime
@@ -135,7 +131,6 @@ class PadGestureDetector(
             }
             MotionEvent.ACTION_MOVE -> {
                 if (downRejectedEdge) return false
-                tracker?.addMovement(ev)
                 val dx = ev.x - downX
                 val dy = ev.y - downY
                 val slopPx = thresholds.touchSlopDp * density
@@ -175,37 +170,26 @@ class PadGestureDetector(
             }
             MotionEvent.ACTION_UP -> {
                 handler.removeCallbacks(longPressTask)
-                tracker?.addMovement(ev)
                 if (downRejectedEdge) {
-                    tracker?.recycle()
-                    tracker = null
                     return false
                 }
                 if (longPressFired) {
                     // Long-press already consumed the stream.
-                    tracker?.recycle()
-                    tracker = null
                     return true
                 }
                 val dx = ev.x - downX
                 val dy = ev.y - downY
                 val dt = (ev.eventTime - downT).coerceAtLeast(1L)
                 if (isTap(dx, dy, dt, density, thresholds)) {
-                    tracker?.recycle()
-                    tracker = null
                     return false
                 }
                 if (deleteSliding) {
                     val words = deleteSlideWords(dx, density, thresholds)
-                    tracker?.recycle()
-                    tracker = null
                     host.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
                     listener.onDeleteRelease(words)
                     return true
                 }
                 val dir = classifyFling(dx, dy, dt, density, thresholds)
-                tracker?.recycle()
-                tracker = null
                 if (dir == null) {
                     listener.onGestureRejected("below-threshold")
                     return true // swallow ambiguous drags; never phantom-tap.
@@ -237,8 +221,6 @@ class PadGestureDetector(
             }
             MotionEvent.ACTION_CANCEL -> {
                 handler.removeCallbacks(longPressTask)
-                tracker?.recycle()
-                tracker = null
                 if (deleteSliding) {
                     deleteSliding = false
                     listener.onDeleteSlide(0)
@@ -250,7 +232,5 @@ class PadGestureDetector(
 
     fun recycle() {
         handler.removeCallbacks(longPressTask)
-        tracker?.recycle()
-        tracker = null
     }
 }
