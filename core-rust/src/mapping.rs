@@ -166,6 +166,17 @@ impl crate::layout::KeyMapping for T9Mapping {
         is_neighbor(a, b)
     }
 
+    /// Neighbor codes over the frozen 12-key pad (`1 2 3 / 4 5 6 / 7 8 9 /
+    /// * 0 #`), in fixed pad order. Matches [`is_neighbor`] exactly (locked
+    /// by `layout::tests::t9_parity_with_mapping` + the test below).
+    fn neighbor_codes(&self, code: char) -> Vec<char> {
+        const CODES: [char; 12] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'];
+        CODES
+            .into_iter()
+            .filter(|&b| is_neighbor(code, b))
+            .collect()
+    }
+
     fn key_label(&self, code: char) -> &str {
         key_label(code)
     }
@@ -296,6 +307,22 @@ mod tests {
         assert!(!is_neighbor('2', '2'));
         assert!(!is_neighbor('2', '9'));
         assert!(!is_neighbor('1', '9'));
+    }
+
+    #[test]
+    fn neighbor_codes_match_is_neighbor() {
+        use crate::layout::KeyMapping;
+        let m = T9Mapping;
+        const CODES: [char; 12] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'];
+        for &a in &CODES {
+            let mut got = m.neighbor_codes(a);
+            got.sort();
+            let mut want: Vec<char> = CODES.into_iter().filter(|&b| is_neighbor(a, b)).collect();
+            want.sort();
+            assert_eq!(got, want, "neighbor_codes({a})");
+            assert!(!got.contains(&a), "never contains self");
+        }
+        assert!(m.neighbor_codes('z').is_empty(), "unknown code -> empty");
     }
 
     #[test]

@@ -48,6 +48,22 @@ pub fn base_term(freq_base: u64, freq_personal: u64) -> f64 {
     ((freq_base + freq_personal + 1) as f64).log10()
 }
 
+/// Quantized static score (plan/05 #7): `log10(freq + 1)` as u16
+/// fixed-point (x1000), precomputed at load. `u16` always suffices
+/// (`log10(u64::MAX + 1) * 1000 < 21000`). Rounding error is <= 0.0005 in
+/// the base term — deterministic (fixed at load, never recomputed), so
+/// repeats stay byte-identical; only ultra-close (< 0.001) cross-candidate
+/// ties could resolve differently than full-float, and those ties are
+/// broken by the total-order comparator either way.
+pub fn quantize_base(freq: u64) -> u16 {
+    (((freq + 1) as f64).log10() * 1000.0).round().clamp(0.0, 65535.0) as u16
+}
+
+/// Back to float for the single-contributor fast path.
+pub fn dequantize_base(q: u16) -> f64 {
+    f64::from(q) / 1000.0
+}
+
 /// `exp(-dt / 7d)` since last accept; 0 when never accepted.
 /// Callers must pass a 1h-quantized `now_ts` (see `personal::quantize_ts`)
 /// so scores are stable within the hour and never flap per-second.
@@ -187,5 +203,20 @@ mod tests {
         let mut high = base_input();
         high.freq_base = 100000;
         assert!(score_candidate(&high, &w) > score_candidate(&low, &w));
+    }
+
+    #[test]
+    fn quantized_base_roundtrips_within_half_lsb() {
+        // Exact at 0; bounded error elsewhere; monotonic non-decreasing.
+        assert_eq!(quantize_base(0), 0);
+        assert_eq!(dequantize_base(0), 0.0);
+        let mut prev = 0u16;
+        for f in [1u64, 9, 99, 100, 900, 7000, 1_000_000, u64::MAX / 2] {
+            let q = quantize_base(f);
+            assert!(q >= prev, "quantize must be monotonic at freq {f}");
+            prev = q;
+            let err = (dequantize_base(q) - base_term(f, 0)).abs();
+            assert!(err <= 0.0005 + 1e-12, "freq {f}: err {err}");
+        }
     }
 }

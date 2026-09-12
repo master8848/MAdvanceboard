@@ -126,6 +126,13 @@ pub trait KeyMapping {
         }
         edits == 1
     }
+    /// Neighbor codes for `code` (distinct adjacent keys; empty when the
+    /// code is unknown). Backs generative 1-edit expansion (plan/05 #2):
+    /// `len × ~8` exact posting lookups instead of an O(N·L) per-entry
+    /// `is_one_edit_neighbor` scan. Order is layout-local and carries no
+    /// semantics — matches merge by (row, best keyfit), so output never
+    /// depends on it.
+    fn neighbor_codes(&self, code: char) -> Vec<char>;
 }
 
 fn one_char(s: &str, what: &str) -> Result<char, String> {
@@ -297,6 +304,10 @@ impl KeyMapping for LayoutSpec {
             return false;
         }
         self.adjacency.get(&a).map(|v| v.contains(&b)).unwrap_or(false)
+    }
+
+    fn neighbor_codes(&self, code: char) -> Vec<char> {
+        self.adjacency.get(&code).cloned().unwrap_or_default()
     }
 
     fn key_label(&self, code: char) -> &str {

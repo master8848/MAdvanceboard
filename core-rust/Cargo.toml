@@ -17,3 +17,4 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # build feature enabled per spec (proc-macro UDL-less export is used;
 # generate_scaffolding scaffolding needs no UDL file in this mode).
 uniffi = { version = "0.32", features = ["build"] }
+flate2 = { version = "1.1.10", features = ["miniz_oxide"] }
