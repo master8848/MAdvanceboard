@@ -1,0 +1,15 @@
+{
+  "id": "numbers",
+  "displayName": "123",
+  "title": "123",
+  "version": "1.0.0",
+  "source": "bundled",
+  "priority": 10,
+  "langs": [
+    "en"
+  ],
+  "description": "Digit commit mode (no prediction)",
+  "privacy": {
+    "learn": false
+  }
+}

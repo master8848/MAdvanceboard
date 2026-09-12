@@ -1,0 +1,15 @@
+{
+  "id": "rust",
+  "displayName": "rust",
+  "title": "rust",
+  "version": "1.0.0",
+  "source": "bundled",
+  "priority": 20,
+  "langs": [
+    "en"
+  ],
+  "description": "Rust keywords",
+  "privacy": {
+    "learn": true
+  }
+}

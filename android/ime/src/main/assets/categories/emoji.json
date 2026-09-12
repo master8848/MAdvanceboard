@@ -1,0 +1,15 @@
+{
+  "id": "emoji",
+  "displayName": "emoji",
+  "title": "emoji",
+  "version": "1.0.0",
+  "source": "bundled",
+  "priority": 30,
+  "langs": [
+    "en"
+  ],
+  "description": "Emoji by keyword (hea->432 = heart)",
+  "privacy": {
+    "learn": true
+  }
+}

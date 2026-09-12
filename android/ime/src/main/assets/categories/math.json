@@ -1,0 +1,16 @@
+{
+  "id": "math",
+  "displayName": "math",
+  "title": "math",
+  "version": "1.0.0",
+  "source": "bundled",
+  "priority": 30,
+  "langs": [
+    "en",
+    "latex"
+  ],
+  "description": "Math symbols by LaTeX name (alp->257 = alpha)",
+  "privacy": {
+    "learn": false
+  }
+}

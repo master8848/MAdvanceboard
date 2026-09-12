@@ -1,0 +1,15 @@
+{
+  "id": "words",
+  "displayName": "EN",
+  "title": "EN",
+  "version": "1.0.0",
+  "source": "bundled",
+  "priority": 0,
+  "langs": [
+    "en"
+  ],
+  "description": "Base English vocabulary",
+  "privacy": {
+    "learn": true
+  }
+}

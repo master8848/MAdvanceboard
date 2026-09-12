@@ -1,0 +1,15 @@
+{
+  "id": "js",
+  "displayName": "js",
+  "title": "js",
+  "version": "1.0.0",
+  "source": "bundled",
+  "priority": 20,
+  "langs": [
+    "en"
+  ],
+  "description": "JavaScript keywords (fun->386 style seq mapping)",
+  "privacy": {
+    "learn": true
+  }
+}

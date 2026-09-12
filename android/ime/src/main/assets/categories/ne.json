@@ -1,0 +1,15 @@
+{
+  "id": "ne",
+  "displayName": "NE",
+  "title": "NE",
+  "version": "1.0.0",
+  "source": "bundled",
+  "priority": 0,
+  "langs": [
+    "ne"
+  ],
+  "description": "Base Nepali vocabulary (Devanagari, phonetic T9 collapse)",
+  "privacy": {
+    "learn": true
+  }
+}

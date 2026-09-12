@@ -1,0 +1,15 @@
+{
+  "id": "html",
+  "displayName": "html",
+  "title": "html",
+  "version": "1.0.0",
+  "source": "bundled",
+  "priority": 20,
+  "langs": [
+    "en"
+  ],
+  "description": "HTML tags and entities",
+  "privacy": {
+    "learn": true
+  }
+}
