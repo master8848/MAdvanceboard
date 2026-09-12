@@ -1131,8 +1131,27 @@ class KbInputMethodService : InputMethodService() {
         // the tab's layout (override -> global -> t9-9) differs. Key
         // labels re-encode from the new spec; the in-progress seq clears
         // because codes belong to the previous pad.
+        //
+        // Per-tab isolation: every suggest carries the active tab, so a
+        // switch must re-query instead of showing the previous tab's strip.
+        // Pending input survives only when the pad is unchanged (same codes
+        // still valid); otherwise buffers clear and the strip empties.
+        val pendingSeq = seq.toString().takeIf { it.isNotEmpty() }
+        val pendingQwerty = qwertyBuffer.toString().takeIf { it.isNotEmpty() }
         val resolved = LayoutStore.layoutForCat(this, activeAssetId)
-        if (resolved != activeLayoutId) setPadLayout(resolved)
+        if (resolved != activeLayoutId) {
+            setPadLayout(resolved)
+            qwertyBuffer.clear()
+            lastShown = emptyList()
+            liveCandidates = emptyList()
+        } else if (pendingSeq != null) {
+            refreshSuggestions(pendingSeq)
+        } else if (pendingQwerty != null) {
+            refreshQwertySuggestions(pendingQwerty)
+        } else {
+            lastShown = emptyList()
+            liveCandidates = emptyList()
+        }
     }
 
     private fun makePad(): View = if (qwertyFallback) {

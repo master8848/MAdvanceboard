@@ -116,6 +116,16 @@ gate itself (still NO-GO on accuracy, as expected).
 | baseline (NO-GO report) | 0.34 | 0.469 | 0.852 PASS | 100.0pts PASS |
 | + fixed V=10k | 0.34 | 0.47 | 0.852 PASS | 100.0pts PASS |
 | + per-tab OFF policy, code-tab filter, w_cat 0.3→1.5 | **0.37** | **0.4845** | **0.845 PASS** | 100.0pts PASS |
+| + hard per-tab isolation default-ON every path | **0.37** | **0.49** | **0.844 PASS** | 99.9pts PASS |
+
+Isolation note: the filter is now default-ON on every suggest path
+(pre-merge scoping; `with_tab_filter(false)` is measurement-only), so the
+gate's own-tab queries run filtered. Movement is small because `w_cat=1.5`
+already paid most of the cross-tab cost: scope ON 0.37 flat, OFF
+0.4845→0.49, KSPW 0.845→0.844, lift 100.0→99.9. Threshold sides unchanged
+(still NO-GO on accuracy as frozen; KSPW + lift PASS). Fresh exp1c deltas
+(filter vs explicit opt-out, ON arm): words +0.004, NE +0.001, js +0.037,
+medical +0.021 — the filter never hurts any tab.
 
 Per-tab OFF after: words 0.88→0.97, js 0.65→0.99, medical 0.67→1.00, NE
 0.40 flat (within-tab ranking, not cross-tab noise). Per-tab ON after:
