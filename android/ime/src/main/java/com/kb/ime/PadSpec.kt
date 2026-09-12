@@ -4,7 +4,7 @@ import android.content.Context
 import org.json.JSONObject
 
 /**
- * UI mirror of the read-only `layouts/*.json` source of truth
+ * UI mirror of the read-only layouts JSON files source of truth
  * (`t9-9` / `t9-12` / `t9-16`). Keys, labels, grid dims and the
  * fat-finger adjacency graph all come from the spec — never hardcoded.
  *
