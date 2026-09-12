@@ -80,6 +80,10 @@ class PadGestureDetector(
     private var lastSlideWords = 0
     private var intercepting = false
     private var downRejectedEdge = false
+    private var lastEventTime = -1L
+    private var lastAction = -1
+    private var lastX = Float.NaN
+    private var lastY = Float.NaN
 
     private val longPressTask = Runnable {
         if (!intercepting && !downRejectedEdge) {
@@ -96,6 +100,18 @@ class PadGestureDetector(
      */
     fun onTouchEvent(ev: MotionEvent): Boolean {
         if (!enabled) return false
+        // The framework re-delivers the intercept-triggering event to
+        // onTouchEvent; the host feeds both paths, so skip exact duplicates
+        // to keep every gesture firing exactly once.
+        if (ev.eventTime == lastEventTime && ev.actionMasked == lastAction &&
+            ev.x == lastX && ev.y == lastY
+        ) {
+            return intercepting
+        }
+        lastEventTime = ev.eventTime
+        lastAction = ev.actionMasked
+        lastX = ev.x
+        lastY = ev.y
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 tracker?.recycle()

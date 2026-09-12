@@ -14,6 +14,12 @@ import android.widget.LinearLayout
  *
  * Letter keys share weight (height target >= 48dp); action row targets are
  * full >= 48dp squares.
+ *
+ * Zone rule (plan 01): QWERTY is button-first (FAB toggles Pad↔QWERTY, avoiding
+ * Samsung spacebar-language-switch false triggers). The only gesture honored
+ * here is fling `→` = accept top suggestion; all other flings are disabled
+ * ([PadGestureDetector.FlingGate.ACCEPT_ONLY]) and reported via
+ * [onGestureRejected] for tuning.
  */
 class QwertyView @JvmOverloads constructor(
     context: Context,
@@ -24,6 +30,23 @@ class QwertyView @JvmOverloads constructor(
     var onDelete: () -> Unit = {}
     var onEnter: () -> Unit = {}
     var onSwitchIme: () -> Unit = {}
+    /** Fling → on the QWERTY view: accept top suggestion (only gesture). */
+    var onFlingAccept: () -> Unit = {}
+    var onGestureRejected: (reason: String) -> Unit = {}
+
+    private val gestures = PadGestureDetector(
+        this,
+        listener = object : PadGestureDetector.Listener() {
+            override fun onFlingRight() = onFlingAccept()
+            override fun onGestureRejected(reason: String) = onGestureRejected(reason)
+        }
+    ).apply { flingsEnabled = PadGestureDetector.FlingGate.ACCEPT_ONLY }
+
+    var gesturesEnabled: Boolean
+        get() = gestures.enabled
+        set(value) { gestures.enabled = value }
+
+    fun updateThresholds(t: GestureThresholds) = gestures.updateThresholds(t)
 
     private val rows = listOf(
         "qwertyuiop",
@@ -88,5 +111,18 @@ class QwertyView @JvmOverloads constructor(
             setOnClickListener { onSwitchIme() }
         })
         addView(actions)
+    }
+
+    override fun onInterceptTouchEvent(ev: android.view.MotionEvent): Boolean =
+        gestures.onTouchEvent(ev) || super.onInterceptTouchEvent(ev)
+
+    override fun onTouchEvent(ev: android.view.MotionEvent): Boolean {
+        gestures.onTouchEvent(ev)
+        return true
+    }
+
+    override fun onDetachedFromWindow() {
+        gestures.recycle()
+        super.onDetachedFromWindow()
     }
 }
