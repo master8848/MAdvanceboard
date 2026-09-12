@@ -84,6 +84,8 @@ fun ImeScreen(
     onExpandAll: () -> Unit = {},
     onToggleQwerty: () -> Unit = {},
     onCategoryChanged: (String) -> Unit = {},
+    /** Strip swipe-down (mode toggle); the host flips the same FAB state. */
+    onToggleMode: () -> Unit = {},
     /** ⚙ key: host deep-links to Settings → Layout (zero layout chrome on the pad). */
     onOpenSettings: () -> Unit = {},
     /** Long-press on a tab: host opens the [PlacementState] popup. */
@@ -180,11 +182,13 @@ fun ImeScreen(
                     expanded = true
                     onExpandAll()
                 },
+                onToggleMode = onToggleMode,
                 onFling = onFling,
                 modifier = Modifier.weight(1f)
             )
-            // QWERTY FAB: button-first toggle (plan 01). No single-finger Pad
-            // gesture toggles this; optional advanced 2-finger swipe ↑ TBD.
+            // QWERTY FAB: button-first toggle (plan 01) + strip swipe-down
+            // duplicate ([classifyModeSwitch]). No single-finger Pad
+            // gesture toggles this (pad axes are all commit paths).
             TextButton(onClick = onToggleQwerty) {
                 Text(if (qwertyActive) "9-KEY" else "QWERTY")
             }

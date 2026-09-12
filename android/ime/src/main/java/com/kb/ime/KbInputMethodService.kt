@@ -437,9 +437,7 @@ class KbInputMethodService : InputMethodService() {
                     onCandidatePicked = { commitCandidate(it) },
                     onExpandAll = { gestureLog.record("bar", "tap-expand", "expand-all") },
                     onToggleQwerty = {
-                        qwertyFallback = !qwertyFallback
-                        gestureLog.record("qwerty", "tap-fab", if (qwertyFallback) "show-qwerty" else "show-pad")
-                        refreshPad(root)
+                        toggleQwertyMode("tap-fab")
                     },
                     onCategoryChanged = { onCategoryChanged(it) },
                     onTabLongPress = { onTabLongPress(it) },
@@ -466,12 +464,10 @@ class KbInputMethodService : InputMethodService() {
                         onDelete = { onPadFlingDelete(1) },
                         onSpace = { onPadSpace() },
                         onAcceptFirst = { acceptTopCandidate("fallback") },
-                        onToggleQwerty = {
-                            qwertyFallback = !qwertyFallback
-                            refreshPad(root)
-                        },
+                        onToggleQwerty = { toggleQwertyMode("fallback-button") },
                         onSym = { showGenericSymbolsSheet() }
                     ),
+                    onToggleMode = { toggleQwertyMode("strip-swipe-down") },
                     statusLine = engineStatus ?: gestureError,
                     onError = { gestureError = it },
                     qwertyActive = qwertyFallback,
@@ -854,6 +850,19 @@ class KbInputMethodService : InputMethodService() {
     internal fun setTabLayout(layoutId: String) {
         LayoutStore.setCatLayout(this, activeAssetId, layoutId)
         setPadLayout(layoutId)
+    }
+
+    /**
+     * Single toggle path for pad 9-key ↔ QWERTY (FAB, TalkBack fallback
+     * button, strip swipe-down). Flips the same FAB state every path reads
+     * ([qwertyActive]), logs the source explicitly, and swaps the pad in
+     * place. The fallback button stays the authoritative accessible path;
+     * the strip gesture only duplicates it.
+     */
+    internal fun toggleQwertyMode(source: String) {
+        qwertyFallback = !qwertyFallback
+        gestureLog.record("qwerty", source, if (qwertyFallback) "show-qwerty" else "show-pad")
+        (cachedInputView as? LinearLayout)?.let { refreshPad(it) }
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.kb.ime
 
+import android.os.SystemClock
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Column
@@ -12,6 +13,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -21,16 +23,19 @@ import androidx.compose.ui.unit.dp
 import kotlin.math.abs
 
 /**
- * SuggestionBar (plan 01 zone: tap + horizontal fling ONLY).
+ * SuggestionBar (plan 01 zone: tap + horizontal fling + vertical swipe).
  *
  * - tap a candidate = accept that word (+auto-space is the service's commit).
  * - fling `→` = accept candidate #1 (top suggestion).
  * - fling `←` = cycle overflow: next page of 3 through the fetched list.
  * - tap `∨` / swipe-up = expand-all sheet (30, paged) — owned by [ImeScreen].
+ * - swipe-DOWN = toggle pad 9-key ↔ QWERTY ([classifyModeSwitch]: the only
+ *   free axis on the strip; duplicates the TalkBack QWERTY FAB, which stays
+ *   authoritative). Vertical down was previously ignored — no gesture moves.
  *
- * No vertical gestures here; no delete. Every gesture duplicates a visible
- * control: candidates are tappable, overflow shows a pager label, and the
- * expand-all button sits in [CategoryTabs].
+ * No delete here. Every gesture duplicates a visible control: candidates
+ * are tappable, overflow shows a pager label, the expand-all button sits in
+ * [CategoryTabs], and the QWERTY FAB sits beside this strip.
  */
 @Composable
 fun SuggestionStrip(
@@ -38,6 +43,8 @@ fun SuggestionStrip(
     onPick: (String) -> Unit,
     onAcceptFirst: () -> Unit = {},
     onExpandAll: () -> Unit = {},
+    /** Strip swipe-down (see [classifyModeSwitch]); defaults to no-op. */
+    onToggleMode: () -> Unit = {},
     onFling: (zone: String, gesture: String, action: String) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
@@ -51,9 +58,11 @@ fun SuggestionStrip(
     }
     val density = LocalDensity.current
     // Single drag classifier (both axes): horizontal → accept/cycle,
-    // swipe-up → expand-all sheet. Vertical down is ignored (no action).
+    // swipe-up → expand-all sheet, swipe-down → QWERTY/9-key toggle.
+    // Vertical down was previously ignored, so nothing moves.
     var dragX by remember { mutableIntStateOf(0) }
     var dragY by remember { mutableIntStateOf(0) }
+    var downT by remember { mutableLongStateOf(0L) }
 
     Column(modifier = modifier.fillMaxWidth()) {
         LazyRow(
@@ -61,8 +70,13 @@ fun SuggestionStrip(
                 .fillMaxWidth()
                 .pointerInput(candidates) {
                     detectDragGestures(
-                        onDragStart = { dragX = 0; dragY = 0 },
+                        onDragStart = {
+                            dragX = 0
+                            dragY = 0
+                            downT = SystemClock.uptimeMillis()
+                        },
                         onDragEnd = {
+                            val dt = (SystemClock.uptimeMillis() - downT).coerceAtLeast(1L)
                             val upThresholdPx = with(density) { 24.dp.toPx() }
                             if (abs(dragX) >= abs(dragY)) {
                                 if (dragX > 0) {
@@ -77,6 +91,12 @@ fun SuggestionStrip(
                             } else if (dragY < -upThresholdPx) {
                                 onFling("bar", "swipe-up", "expand-all")
                                 onExpandAll()
+                            } else if (classifyModeSwitch(
+                                    dragX.toFloat(), dragY.toFloat(), dt, density.density
+                                )
+                            ) {
+                                onFling("bar", "swipe-down", "toggle-mode")
+                                onToggleMode()
                             }
                             dragX = 0
                             dragY = 0
