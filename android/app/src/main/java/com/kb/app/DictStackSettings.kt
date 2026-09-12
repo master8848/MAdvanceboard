@@ -125,10 +125,7 @@ fun DictStackSection() {
         }
     }
 
-    Text(
-        "Dictionary stack", style = MaterialTheme.typography.headlineSmall,
-        modifier = Modifier.padding(top = 24.dp)
-    )
+    SettingsSectionTitle("Dictionary stack")
     Text(
         "Suggest priority order (top = wins ties). Drag the ≡ handle or " +
             "use Up/Down — both reassign priorities 10-90. Export/import " +

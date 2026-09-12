@@ -5,6 +5,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.PrimaryScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
@@ -17,6 +18,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
@@ -69,6 +71,11 @@ fun CategoryTabs(
     Row(modifier = modifier.fillMaxWidth()) {
         PrimaryScrollableTabRow(
             selectedTabIndex = selected,
+            // Transparent bed: the strip floats on the keyboard background
+            // instead of drawing an opaque surface band (dark-mode safe —
+            // selected/unselected come from the scheme explicitly).
+            containerColor = Color.Transparent,
+            contentColor = MaterialTheme.colorScheme.primary,
             modifier = Modifier
                 .weight(1f)
                 .pointerInput(categories.size) {
@@ -108,6 +115,8 @@ fun CategoryTabs(
                     onClick = { onSelect(index) },
                     // Engine id stays `words`; humans see "General".
                     text = { Text(CategoryLabels.label(cat)) },
+                    selectedContentColor = MaterialTheme.colorScheme.primary,
+                    unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.pointerInput(cat) {
                         detectTapGestures(
                             onLongPress = { latestOnTabLongPress(cat) }

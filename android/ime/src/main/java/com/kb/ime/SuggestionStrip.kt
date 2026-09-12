@@ -1,14 +1,14 @@
 package com.kb.ime
 
 import android.os.SystemClock
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -111,13 +111,33 @@ fun SuggestionStrip(
                     )
                 }
         ) {
-            items(shown) { word ->
-                Text(
-                    text = word,
-                    modifier = Modifier
-                        .clickable { onPick(word) }
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
-                )
+            itemsIndexed(shown) { index, word ->
+                // Top suggestion leads in primary; the rest sit tonal.
+                // 12dp vertical padding keeps the ~48dp touch target.
+                val container = if (index == 0) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.secondaryContainer
+                }
+                val content = if (index == 0) {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSecondaryContainer
+                }
+                Surface(
+                    onClick = { onPick(word) },
+                    shape = ExpressiveChipShape,
+                    color = container,
+                    tonalElevation = 1.dp,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = word,
+                        color = content,
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                    )
+                }
             }
         }
         if (pageCount > 1) {

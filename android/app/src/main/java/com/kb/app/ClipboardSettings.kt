@@ -80,10 +80,7 @@ fun ClipboardSettingsSection() {
         }
     }
 
-    Text(
-        "Clipboard", style = MaterialTheme.typography.headlineSmall,
-        modifier = Modifier.padding(top = 24.dp)
-    )
+    SettingsSectionTitle("Clipboard")
     Text(
         "History lives on this device only (never synced, never learned " +
             "into suggestions). Unpinned items auto-delete past retention; " +

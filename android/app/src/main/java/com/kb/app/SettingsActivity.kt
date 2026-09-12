@@ -87,6 +87,22 @@ fun SettingsScreen() {
 }
 
 /**
+ * Consistent section header (M3 Expressive pass): titleMedium in primary
+ * with uniform top spacing. Every Settings section uses this — the screen
+ * title keeps headlineSmall, so the hierarchy is exactly two levels in
+ * light and dark themes (no hardcoded colors).
+ */
+@Composable
+fun SettingsSectionTitle(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.titleMedium,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = 24.dp)
+    )
+}
+
+/**
  * Settings → Layout (plan 02): global default (t9-9 / t9-12 / t9-16) plus
  * the per-tab override list (e.g. General→t9-9, NE→t9-16). Persisted by
  * [LayoutStore] (same prefs file the IME service resolves per
@@ -117,10 +133,7 @@ fun LayoutSettingsSection() {
     var global by remember(savedTick) { mutableStateOf(readGlobal()) }
     var overrides by remember(savedTick) { mutableStateOf(readOverrides()) }
 
-    Text(
-        "Layout", style = MaterialTheme.typography.headlineSmall,
-        modifier = Modifier.padding(top = 24.dp)
-    )
+    SettingsSectionTitle("Layout")
     error?.let {
         Text(it, color = MaterialTheme.colorScheme.error)
     }
@@ -219,10 +232,7 @@ fun CustomCategorySection() {
 
     var packs by remember(savedTick) { mutableStateOf(readPacks()) }
 
-    Text(
-        "Custom categories", style = MaterialTheme.typography.headlineSmall,
-        modifier = Modifier.padding(top = 24.dp)
-    )
+    SettingsSectionTitle("Custom categories")
     Text(
         "New tab from your own wordlist (e.g. a names list). " +
             "One `word [freq]` per line, `#` comments allowed. " +
@@ -380,8 +390,7 @@ fun GestureTuningSection() {
         )
     }
 
-    Text("Gesture Tuning", style = MaterialTheme.typography.headlineSmall,
-        modifier = Modifier.padding(top = 24.dp))
+    SettingsSectionTitle("Gesture Tuning")
     error?.let {
         Text(it, color = MaterialTheme.colorScheme.error)
     }

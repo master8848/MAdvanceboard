@@ -17,7 +17,10 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -375,17 +378,26 @@ fun UndoBar(onUndo: () -> Unit, modifier: Modifier = Modifier) {
             secondsLeft = i
         }
     }
-    Row(
+    Surface(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        shape = ExpressiveChipShape,
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        tonalElevation = 2.dp
     ) {
-        Text(
-            text = "Deleted — undo available (${secondsLeft}s)",
-            style = MaterialTheme.typography.labelMedium
-        )
-        TextButton(onClick = onUndo) { Text("Undo") }
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "Deleted — undo available (${secondsLeft}s)",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.padding(vertical = 12.dp)
+            )
+            TextButton(onClick = onUndo) { Text("Undo") }
+        }
     }
 }
 
@@ -406,7 +418,12 @@ fun PlacementPopup(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Card(modifier = modifier.fillMaxWidth().padding(8.dp)) {
+    Card(
+        modifier = modifier.fillMaxWidth().padding(8.dp),
+        shape = ExpressiveCardShape,
+        colors = expressiveCardColors(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
                 // Engine id stays internal; humans see "General".
@@ -491,11 +508,22 @@ fun GestureCoach(onSkip: () -> Unit, onDone: () -> Unit) {
         "Swipe ←/→ on the category tabs (General, NE, …) to switch " +
             "dictionaries. Long-press a tab for its pack info."
     )
-    Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(8.dp),
+        shape = ExpressiveCardShape,
+        colors = expressiveCardColors(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
                 text = "Welcome to T9 — step ${step + 1} of 3",
                 style = MaterialTheme.typography.titleSmall
+            )
+            LinearProgressIndicator(
+                progress = { (step + 1) / 3f },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
             )
             Text(text = steps[step], modifier = Modifier.padding(vertical = 8.dp))
             Row(horizontalArrangement = Arrangement.SpaceBetween) {
