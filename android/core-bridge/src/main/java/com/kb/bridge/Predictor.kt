@@ -273,6 +273,11 @@ const val STUB_LEARN_CAP = 20_000
  */
 class StubPredictor : Predictor {
     private val learned = mutableListOf<Pair<String, String>>()
+    // `rejected`/`blocked` are intentionally uncapped: evicting a tombstone
+    // would silently resurrect a blocked word. Growth is action-gated (one
+    // entry per explicit reject/block, not per keystroke), the stub is
+    // session-scoped (dies with the process), and the real engine owns the
+    // durable tombstone set — so this cannot leak across sessions.
     private val rejected = mutableSetOf<String>()
     private val blocked = mutableSetOf<String>()
 
