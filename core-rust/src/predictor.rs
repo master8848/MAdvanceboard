@@ -8,6 +8,7 @@ use crate::pack::{load_pack_str, PackFile};
 use crate::personal::now_quantized;
 use crate::session::SessionLogger;
 use crate::stack::{DictionaryStack, Suggestion};
+use crate::store::{FlushStats, Store};
 
 struct Inner {
     stack: DictionaryStack,
@@ -21,6 +22,17 @@ struct Inner {
     /// instead of a silent `t9-9` fallback. Also mirrored to stderr
     /// for host logs.
     last_layout_error: Option<String>,
+    /// Single durable handle (plan `06-persistence-power.md`): one
+    /// `rusqlite::Connection` behind this `Mutex`, pragmas
+    /// `WAL/NORMAL/MEMORY`, dirty-set + 2 s coalesced flush. `None` until
+    /// [`Predictor::open_persist`] runs — suggest/learn work fully in RAM
+    /// without it, so a missing DB never breaks typing.
+    persist: Option<Store>,
+    /// Last persistence failure, if any. Every flush/checkpoint I/O error
+    /// lands here AND on stderr; UniFFI callers read it via
+    /// [`Predictor::take_last_persist_error`] — failures are explicit, never
+    /// a silent empty save.
+    last_persist_error: Option<String>,
 }
 
 impl Inner {
@@ -29,6 +41,11 @@ impl Inner {
             eprintln!("kbcore layout: {e}");
             self.last_layout_error = Some(e);
         }
+    }
+
+    fn note_persist_error(&mut self, err: String) {
+        eprintln!("kbcore persist: {err}");
+        self.last_persist_error = Some(err);
     }
 }
 
@@ -254,6 +271,9 @@ impl Predictor {
     /// and log an accepted session event. The shown-candidates seq and
     /// the session-log seq encode under the category's resolved layout
     /// (per-cat override -> global default -> `t9-9`).
+    /// Durability is coalesced: the mutation dirties RAM only; when the
+    /// 2 s window has elapsed the flush runs inline (failures recorded to
+    /// `take_last_persist_error`, never fatal to the keystroke).
     pub fn learn(&self, word: String, category: String) {
         self.inner.lock().map(|mut i| {
             let cat = if category.is_empty() { "EN" } else { &category };
@@ -269,6 +289,7 @@ impl Predictor {
                 .collect();
             i.stack.personal.learn(&word, cat);
             i.session.log_accepted(&seq, "", &word, &shown);
+            Self::flush_if_due_inner(&mut i);
         }).unwrap_or_else(|e| panic!("Predictor::learn: lock poisoned: {e}"));
     }
 
@@ -276,6 +297,7 @@ impl Predictor {
     pub fn forget(&self, word: String) {
         self.inner.lock().map(|mut i| {
             i.stack.personal.forget(&word);
+            Self::flush_if_due_inner(&mut i);
         }).unwrap_or_else(|e| panic!("Predictor::forget: lock poisoned: {e}"));
     }
 
@@ -295,6 +317,7 @@ impl Predictor {
                 .collect();
             i.stack.personal.record_reject(&word);
             i.session.log_rejected(&seq, "", &word, &shown);
+            Self::flush_if_due_inner(&mut i);
         }).unwrap_or_else(|e| panic!("Predictor::reject: lock poisoned: {e}"));
     }
 
@@ -304,6 +327,97 @@ impl Predictor {
             .lock()
             .map(|i| i.session.export_jsonl())
             .unwrap_or_else(|e| panic!("Predictor::export_session: lock poisoned: {e}"))
+    }
+
+    // ---- Persistence (plan 06): single handle, coalesced flush ----
+
+    /// Open (or create) the durable store at `path` and attach the sync
+    /// folder for `wal.log` + hourly snapshots. Returns `""` on success or
+    /// an explicit error string (also retrievable via
+    /// [`Self::take_last_persist_error`]). Typing works fully without this;
+    /// durability is strictly additive.
+    pub fn open_persist(&self, path: String, sync_dir: String) -> String {
+        self.inner
+            .lock()
+            .map(|mut i| match Store::open(std::path::Path::new(&path)) {
+                Ok(mut store) => {
+                    if !sync_dir.is_empty() {
+                        store.set_sync_dir(Some(std::path::PathBuf::from(&sync_dir)));
+                    }
+                    i.persist = Some(store);
+                    String::new()
+                }
+                Err(e) => {
+                    i.note_persist_error(e.clone());
+                    e
+                }
+            })
+            .unwrap_or_else(|e| panic!("Predictor::open_persist: lock poisoned: {e}"))
+    }
+
+    /// Force-flush dirty rows + pending session events now (ignores the 2 s
+    /// coalesce window). Returns `""` on success or an explicit error
+    /// string. Without an open store the error says so explicitly.
+    pub fn flush_persist(&self) -> String {
+        self.inner
+            .lock()
+            .map(|mut i| match Self::flush_now_inner(&mut i) {
+                Ok(stats) => {
+                    if stats.session_rows > 0 && i.session.dropped_unflushed() > 0 {
+                        let w = format!(
+                            "session: {} unflushed event(s) dropped by pending-queue overflow",
+                            i.session.dropped_unflushed()
+                        );
+                        i.note_persist_error(w.clone());
+                        return w;
+                    }
+                    String::new()
+                }
+                Err(e) => {
+                    i.note_persist_error(e.clone());
+                    e
+                }
+            })
+            .unwrap_or_else(|e| panic!("Predictor::flush_persist: lock poisoned: {e}"))
+    }
+
+    /// Hourly sync-folder compact: rewrite `personal.jsonl`/`bigrams.jsonl`,
+    /// write `snapshot-<ts>.gz`, truncate `wal.log`, checkpoint WAL.
+    /// Returns the snapshot path on success or an explicit error string.
+    pub fn compact_persist(&self) -> String {
+        self.inner
+            .lock()
+            .map(|mut i| {
+                if i.persist.is_none() {
+                    return "persist not opened: call open_persist first".to_string();
+                }
+                // Disjoint-in-time borrows: render JSONL first (short immutable
+                // borrow), then compact under the store borrow. `MutexGuard`
+                // deref is borrow-conservative, so the two may not overlap.
+                let personal_jsonl = i.stack.personal.to_jsonl();
+                let bigrams_jsonl = i.stack.personal.bigrams_jsonl();
+                let res = match i.persist.as_mut() {
+                    None => return "persist not opened: call open_persist first".to_string(),
+                    Some(store) => store.compact_sync_folder(&personal_jsonl, &bigrams_jsonl),
+                };
+                match res {
+                    Ok(s) => s.map(|p| p.display().to_string()).unwrap_or_default(),
+                    Err(e) => {
+                        i.note_persist_error(e.clone());
+                        e
+                    }
+                }
+            })
+            .unwrap_or_else(|e| panic!("Predictor::compact_persist: lock poisoned: {e}"))
+    }
+
+    /// Take (and clear) the last persistence error. `""` means no recorded
+    /// failure since the last call.
+    pub fn take_last_persist_error(&self) -> String {
+        self.inner
+            .lock()
+            .map(|mut i| i.last_persist_error.take().unwrap_or_default())
+            .unwrap_or_else(|e| panic!("Predictor::take_last_persist_error: lock poisoned: {e}"))
     }
 }
 
@@ -323,6 +437,8 @@ impl Predictor {
                 session: SessionLogger::new(),
                 layouts: LayoutRegistry::with_builtins(),
                 last_layout_error: None,
+                persist: None,
+                last_persist_error: None,
             }),
         }))
     }
@@ -434,6 +550,49 @@ impl Predictor {
         })?;
         self.try_add_pack(&pack, priority)
     }
+
+    // ---- Persistence: fallible Rust APIs (UniFFI-safe wrappers above) ----
+
+    /// Flush dirty rows + pending events through the open store.
+    pub fn try_flush(&self) -> Result<FlushStats, String> {
+        self.inner
+            .lock()
+            .map(|mut i| Self::flush_now_inner(&mut i))
+            .unwrap_or_else(|e| panic!("Predictor::try_flush: lock poisoned: {e}"))
+    }
+
+    /// Flush only when the 2 s coalesce window has elapsed (hot-path hook).
+    pub fn try_flush_if_due(&self) -> Result<Option<FlushStats>, String> {
+        self.inner
+            .lock()
+            .map(|mut i| {
+                let due = i.persist.as_ref().map(|s| s.flush_due()).unwrap_or(false);
+                let dirty = i.stack.personal.is_flush_dirty() || i.session.pending_len() > 0;
+                if due && dirty {
+                    Self::flush_now_inner(&mut i).map(Some)
+                } else {
+                    Ok(None)
+                }
+            })
+            .unwrap_or_else(|e| panic!("Predictor::try_flush_if_due: lock poisoned: {e}"))
+    }
+
+    fn flush_now_inner(i: &mut Inner) -> Result<FlushStats, String> {
+        match i.persist.as_mut() {
+            None => Err("persist not opened: call open_persist first".to_string()),
+            Some(store) => store.flush(&mut i.stack.personal, &mut i.session),
+        }
+    }
+
+    fn flush_if_due_inner(i: &mut Inner) {
+        let due = i.persist.as_ref().map(|s| s.flush_due()).unwrap_or(false);
+        let dirty = i.stack.personal.is_flush_dirty() || i.session.pending_len() > 0;
+        if due && dirty {
+            if let Err(e) = Self::flush_now_inner(i) {
+                i.note_persist_error(e);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -531,6 +690,44 @@ mod tests {
             5,
         );
         assert_eq!(p.take_last_layout_error(), "");
+    }
+
+    #[test]
+    fn persist_open_flush_compact_roundtrip() {
+        let dir = std::env::temp_dir().join("kbcore_predictor_persist");
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = dir.join("kb.sqlite").display().to_string();
+        let sync = dir.join("sync").display().to_string();
+        let p = Predictor::new("[]".to_string());
+        // Explicit error before open (returned AND recorded for later take).
+        assert!(p.flush_persist().contains("not opened"));
+        assert!(p.take_last_persist_error().contains("not opened"));
+        assert_eq!(p.open_persist(db, sync), "");
+        p.learn("hello".to_string(), "EN".to_string());
+        // Coalesced hook may or may not have flushed; forced flush is exact.
+        let stats = p.try_flush().unwrap();
+        assert!(stats.personal_rows <= 1, "stats: {stats:?}");
+        let stats2 = p.try_flush().unwrap();
+        assert_eq!(stats2.personal_rows, 0, "clean flush writes nothing");
+        assert_eq!(stats2.session_rows, 0);
+        let snap = p.compact_persist();
+        assert!(snap.contains("snapshot-"), "snap: {snap}");
+        assert_eq!(p.take_last_persist_error(), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_open_failure_is_explicit() {
+        let p = Predictor::new("[]".to_string());
+        // A path through a regular file cannot hold a DB parent dir.
+        let file = std::env::temp_dir().join("kbcore_persist_blocker");
+        std::fs::write(&file, b"x").unwrap();
+        let bad = file.join("kb.sqlite").display().to_string();
+        let err = p.open_persist(bad, "".to_string());
+        assert!(!err.is_empty(), "open failure must surface, not swallow");
+        assert!(!p.take_last_persist_error().is_empty());
+        assert_eq!(p.take_last_persist_error(), "", "take clears");
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]
