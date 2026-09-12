@@ -723,7 +723,7 @@ class KbInputMethodService : InputMethodService() {
     private fun prevWord(): String? {
         if (isPasswordField || isIncognito) return null
         return try {
-            currentInputConnection?.getTextBeforeCursor(32, 0)?.toString()
+            currentInputConnection?.getTextBeforeCursor(CURSOR_CONTEXT_CHARS, 0)?.toString()
                 ?.split(Regex("\\s+"))?.lastOrNull()?.takeIf { it.isNotEmpty() }
         } catch (_: Exception) {
             null
@@ -811,7 +811,7 @@ class KbInputMethodService : InputMethodService() {
     /** Records a reject when the user deletes within 5s of a commit. */
     private fun maybeRejectLastCommit() {
         val word = lastCommitWord ?: return
-        if (System.currentTimeMillis() - lastCommitTs > 5000) {
+        if (System.currentTimeMillis() - lastCommitTs > REJECT_WINDOW_MS) {
             lastCommitWord = null
             return
         }
@@ -872,7 +872,7 @@ class KbInputMethodService : InputMethodService() {
         }
         maybeRejectLastCommit()
         val before = try {
-            ic.getTextBeforeCursor(256, 0)?.toString().orEmpty()
+            ic.getTextBeforeCursor(DELETE_LOOKBACK_CHARS, 0)?.toString().orEmpty()
         } catch (e: Exception) {
             reportGestureError("Delete failed: could not read text (${e.message})")
             return
@@ -916,7 +916,7 @@ class KbInputMethodService : InputMethodService() {
             undoText = ""
         }
         undoExpiry = expiry
-        mainHandler.postDelayed(expiry, 5000)
+        mainHandler.postDelayed(expiry, UNDO_WINDOW_MS)
     }
 
     internal fun undoDelete() {
@@ -1129,6 +1129,22 @@ class KbInputMethodService : InputMethodService() {
             "packs/words_en.json",
             "packs/nepali.json"
         )
+
+        /**
+         * Reject window (SPEC §2): deleting a committed word within this long
+         * after commit records a reject. Shared with the undo affordance so
+         * the two 5s windows never drift apart.
+         */
+        const val REJECT_WINDOW_MS = 5_000L
+
+        /** Undo availability after a fling-delete commit ([REJECT_WINDOW_MS]). */
+        const val UNDO_WINDOW_MS = 5_000L
+
+        /** Chars of text-before-cursor read for the bigram prev word. */
+        const val CURSOR_CONTEXT_CHARS = 32
+
+        /** Chars of text-before-cursor scanned for word-boundary deletes. */
+        const val DELETE_LOOKBACK_CHARS = 256
     }
 }
 

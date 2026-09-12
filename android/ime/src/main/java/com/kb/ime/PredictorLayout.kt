@@ -25,6 +25,11 @@ const val EXPAND_LIMIT = 30
  *
  * Unknown ids are an explicit [IllegalArgumentException], never a silent
  * wrong-pad forward.
+ *
+ * Nullability contract: [prev] is null under no-learn (password, incognito,
+ * email/URI — see `prevWord`, which harvests no context there) and maps to
+ * `ctx = ""` (no bigram) — an explicit empty context, never the literal
+ * string "null" and never a harvested word that must not be read.
  */
 suspend fun suggestWithLayout(
     predictor: Predictor,
