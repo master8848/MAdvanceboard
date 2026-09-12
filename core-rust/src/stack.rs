@@ -438,6 +438,112 @@ struct MergedRow {
     min_idx: u32,
 }
 
+/// Experimental tuning knobs for the suggest pipeline (plan/00 cheapest-first
+/// remedies, plan/09 spikes). `Default` reproduces the frozen behavior
+/// exactly (`include_prefix=true` at keyfit 0.9, neighbor on at 0.6, no tab
+/// filter); every experiment passes an explicit non-default value so deltas
+/// are measured, never silently applied. Keyfit values are contractually in
+/// `[0.0, 1.0]` (debug-asserted); out-of-range values are a caller bug, not
+/// clamped silently.
+#[derive(Clone, Debug)]
+pub struct SuggestOpts {
+    /// Match prefix candidates (`seq` starts with `digits`) at `prefix_keyfit`.
+    pub include_prefix: bool,
+    /// Keyfit score for prefix matches (frozen default 0.9).
+    pub prefix_keyfit: f64,
+    /// Match 1-edit adjacent-key neighbors at `neighbor_keyfit`.
+    pub include_neighbor: bool,
+    /// Keyfit score for neighbor matches (frozen default 0.6).
+    pub neighbor_keyfit: f64,
+    /// Keep only candidates whose display `cat` equals the active tab
+    /// (code-tab noise experiment). Personal rows learned under another tab
+    /// are dropped too — that collateral is part of the measured delta.
+    pub hard_tab_filter: bool,
+}
+
+impl Default for SuggestOpts {
+    fn default() -> Self {
+        Self {
+            include_prefix: true,
+            prefix_keyfit: 0.9,
+            include_neighbor: true,
+            neighbor_keyfit: 0.6,
+            hard_tab_filter: false,
+        }
+    }
+}
+
+impl SuggestOpts {
+    /// The gate's precision arm: exact + prefix only, no fuzzy neighbors.
+    pub fn neighbor_off() -> Self {
+        Self {
+            include_neighbor: false,
+            ..Default::default()
+        }
+    }
+
+    /// Exact-only arm (prefix-toggle experiment): no prefix, no neighbors.
+    pub fn exact_only() -> Self {
+        Self {
+            include_prefix: false,
+            include_neighbor: false,
+            ..Default::default()
+        }
+    }
+}
+
+/// Where a gate miss lost its target in the suggest pipeline (step-1
+/// instrumentation): outside the union entirely (alias/encoding gap), cut by
+/// the pre-truncate 200 cap (freq-order victim), or scored but ranked out of
+/// the top-3 (weight problem). All ranks are 1-based; `None` means absent at
+/// that stage.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TargetProbe {
+    /// Target matched some row's (primary, aliases) seqs at all.
+    pub in_union: bool,
+    /// Union size before truncation.
+    pub union_size: usize,
+    /// Rank in the pre-truncate freq-desc total order.
+    pub pre_truncate_rank: Option<usize>,
+    /// Survives the 200-truncate (rank <= 200).
+    pub in_truncate200: bool,
+    /// Best keyfit across the target's matching seqs.
+    pub keyfit: Option<f64>,
+    /// Rank after full scoring with NO truncation (all union rows scored).
+    pub scored_rank_all: Option<usize>,
+    /// Rank in the real top-`limit` output (`None` = absent: truncated,
+    /// threshold-hidden, or blocked).
+    pub top_rank: Option<usize>,
+    /// Present in the scored set but below `hide_threshold`.
+    pub hidden_by_threshold: bool,
+    /// Suppressed by a personal block tombstone.
+    pub blocked: bool,
+}
+
+/// Fully-scored candidate before the top-N heap (module scope so
+/// [`DictionaryStack::score_rows`] and the probe path can share it).
+struct Scored {
+    word: String,
+    seq: String,
+    cat: String,
+    lang: String,
+    score: f64,
+    priority: i32,
+}
+
+/// Total-order rank comparator (score desc, shorter, lexicographic,
+/// pack priority, lang): shared by the top-N heap and the probe's
+/// full-list ranking so both agree on every tie.
+fn cmp_scored(a: &Scored, b: &Scored) -> std::cmp::Ordering {
+    b.score
+        .partial_cmp(&a.score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.word.len().cmp(&b.word.len()))
+        .then_with(|| a.word.cmp(&b.word))
+        .then_with(|| b.priority.cmp(&a.priority))
+        .then_with(|| a.lang.cmp(&b.lang))
+}
+
 /// Scored candidate returned to the UI / UniFFI.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Suggestion {
@@ -852,7 +958,7 @@ impl DictionaryStack {
                 )
             },
             mapping,
-            true,
+            &SuggestOpts::default(),
             &is_one_edit_neighbor,
             &|c| c.is_ascii_digit(),
             now,
@@ -894,11 +1000,143 @@ impl DictionaryStack {
                 )
             },
             mapping,
-            false,
+            &SuggestOpts::neighbor_off(),
             &|_, _| false,
             &|c| c.is_ascii_digit(),
             now,
         )
+    }
+
+    /// Suggest with explicit tuning knobs (plan/00 cheapest-first remedies):
+    /// frozen `t9-9` path, same quantization contract as
+    /// [`Self::suggest_at`]. `SuggestOpts::default()` reproduces
+    /// [`Self::suggest_at`] exactly; every experiment passes an explicit
+    /// non-default value. This is also the per-tab override vehicle behind
+    /// a default-neighbor-OFF policy (plan/00 item 4): the caller picks
+    /// `include_neighbor` per tab and the choice is measured, not silent.
+    pub fn suggest_with_opts_at(
+        &self,
+        ctx: &str,
+        digits: &str,
+        active_tab: &str,
+        limit: usize,
+        now: i64,
+        opts: &SuggestOpts,
+    ) -> Vec<Suggestion> {
+        let mapping = LayoutRegistry::builtins_cached().get_or_default(DEFAULT_LAYOUT_ID);
+        self.suggest_inner(
+            ctx,
+            digits,
+            active_tab,
+            limit,
+            DEFAULT_LAYOUT_ID,
+            &|e| {
+                (
+                    Cow::Borrowed(e.seq_for_layout(DEFAULT_LAYOUT_ID)),
+                    Cow::Borrowed(e.aliases_for_layout(DEFAULT_LAYOUT_ID)),
+                )
+            },
+            mapping,
+            opts,
+            &is_one_edit_neighbor,
+            &|c| c.is_ascii_digit(),
+            now,
+        )
+    }
+
+    /// Step-1 miss instrumentation: where `target` is lost in the pipeline
+    /// for (`ctx`, `digits`, tab) under `opts` (frozen `t9-9` path, same
+    /// quantization contract as [`Self::suggest_at`]). The union is built by
+    /// the same [`Self::build_union`] the real path uses, the pre-truncate
+    /// rank uses the same total order, and the full-list rank scores every
+    /// union row with no truncation — so `in_union=false` means an
+    /// alias/encoding gap, `!in_truncate200` a freq-order victim, and
+    /// `scored_rank_all>3` a weight problem. Never panics: invalid input
+    /// yields an all-absent probe (mirroring the empty suggest output).
+    pub fn probe_target_at(
+        &self,
+        ctx: &str,
+        digits: &str,
+        active_tab: &str,
+        target: &str,
+        limit: usize,
+        now: i64,
+        opts: &SuggestOpts,
+    ) -> TargetProbe {
+        let blocked = self.personal.is_blocked(target);
+        let absent = |union_size: usize| TargetProbe {
+            in_union: false,
+            union_size,
+            pre_truncate_rank: None,
+            in_truncate200: false,
+            keyfit: None,
+            scored_rank_all: None,
+            top_rank: None,
+            hidden_by_threshold: false,
+            blocked,
+        };
+        if digits.is_empty()
+            || !digits.chars().all(|c| c.is_ascii_digit())
+            || limit == 0
+            || target.is_empty()
+        {
+            return absent(0);
+        }
+        let mapping = LayoutRegistry::builtins_cached().get_or_default(DEFAULT_LAYOUT_ID);
+        let mut merged = self.build_union(
+            digits,
+            DEFAULT_LAYOUT_ID,
+            &|e| {
+                (
+                    Cow::Borrowed(e.seq_for_layout(DEFAULT_LAYOUT_ID)),
+                    Cow::Borrowed(e.aliases_for_layout(DEFAULT_LAYOUT_ID)),
+                )
+            },
+            mapping,
+            opts,
+            &is_one_edit_neighbor,
+        );
+        if opts.hard_tab_filter {
+            merged.retain(|_, m| m.cat == active_tab);
+        }
+        let union_size = merged.len();
+        let mut items: Vec<MergedRow> = merged.into_values().collect();
+        items.sort_by(|a, b| {
+            b.freq_base
+                .cmp(&a.freq_base)
+                .then_with(|| a.word.cmp(&b.word))
+                .then_with(|| a.lang.cmp(&b.lang))
+        });
+        let hit = items.iter().find(|m| m.word == target);
+        let Some(hit) = hit else {
+            return absent(union_size);
+        };
+        let keyfit = hit.keyfit;
+        let pre_rank = items.iter().position(|m| m.word == target).map(|i| i + 1);
+        let in_truncate200 = pre_rank.map(|r| r <= 200).unwrap_or(false);
+        let prev = ctx.split_whitespace().last().unwrap_or("").to_lowercase();
+        let mut scored_all = self.score_rows(items, &prev, active_tab, now);
+        scored_all.sort_by(cmp_scored);
+        let scored_rank = scored_all
+            .iter()
+            .position(|s| s.word == target)
+            .map(|i| i + 1);
+        let top_rank = self
+            .suggest_with_opts_at(ctx, digits, active_tab, limit, now, opts)
+            .iter()
+            .position(|s| s.word == target)
+            .map(|i| i + 1);
+        TargetProbe {
+            in_union: true,
+            union_size,
+            pre_truncate_rank: pre_rank,
+            in_truncate200,
+            keyfit: Some(keyfit),
+            scored_rank_all: scored_rank,
+            top_rank,
+            hidden_by_threshold: in_truncate200 && !blocked && scored_rank.is_none(),
+            blocked,
+        }
     }
 
     /// Suggest under an explicit layout: candidates match by the seq the
@@ -945,7 +1183,7 @@ impl DictionaryStack {
                     )
                 },
                 mapping,
-                true,
+                &SuggestOpts::default(),
                 &|a, b| mapping.is_one_edit_neighbor(a, b),
                 &|c| mapping.contains_code(c),
                 now,
@@ -962,7 +1200,7 @@ impl DictionaryStack {
                     (Cow::Owned(primary), Cow::Owned(aliases))
                 },
                 mapping,
-                true,
+                &SuggestOpts::default(),
                 &|a, b| mapping.is_one_edit_neighbor(a, b),
                 &|c| mapping.contains_code(c),
                 now,
@@ -995,7 +1233,7 @@ impl DictionaryStack {
                     )
                 },
                 mapping,
-                false,
+                &SuggestOpts::neighbor_off(),
                 &|_, _| false,
                 &|c| mapping.contains_code(c),
                 now,
@@ -1012,7 +1250,7 @@ impl DictionaryStack {
                     (Cow::Owned(primary), Cow::Owned(aliases))
                 },
                 mapping,
-                false,
+                &SuggestOpts::neighbor_off(),
                 &|_, _| false,
                 &|c| mapping.contains_code(c),
                 now,
@@ -1021,25 +1259,18 @@ impl DictionaryStack {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn suggest_inner(
+    /// Build the suggest union (static rows + personal OOV) without
+    /// truncating or scoring: shared by [`Self::suggest_inner`] and the
+    /// step-1 miss instrumentation ([`Self::probe_target_at`]).
+    fn build_union(
         &self,
-        ctx: &str,
         digits: &str,
-        active_tab: &str,
-        limit: usize,
         layout_id: &str,
         seqs_of: &dyn Fn(&DictEntry) -> (Cow<'_, str>, Cow<'_, [String]>),
         mapping: &dyn KeyMapping,
-        neighbor_on: bool,
+        opts: &SuggestOpts,
         is_neighbor_edit: &dyn Fn(&str, &str) -> bool,
-        is_code: &dyn Fn(char) -> bool,
-        now: i64,
-    ) -> Vec<Suggestion> {
-        if digits.is_empty() || !digits.chars().all(is_code) || limit == 0 {
-            return Vec::new();
-        }
-        let prev = ctx.split_whitespace().last().unwrap_or("").to_lowercase();
-
+    ) -> HashMap<String, MergedRow> {
         // Union across base + extensions, keyed by (norm word, lang).
         // Each row matches match-any over its (primary, aliases) seqs;
         // keyfit is the best across them. Alias ROWS (same word, distinct
@@ -1050,10 +1281,10 @@ impl DictionaryStack {
         let keyfit_of = |eseq: &str| -> Option<f64> {
             if eseq == digits {
                 Some(1.0)
-            } else if eseq.starts_with(digits) {
-                Some(0.9)
-            } else if is_neighbor_edit(digits, eseq) {
-                Some(0.6)
+            } else if opts.include_prefix && eseq.starts_with(digits) {
+                Some(opts.prefix_keyfit)
+            } else if opts.include_neighbor && is_neighbor_edit(digits, eseq) {
+                Some(opts.neighbor_keyfit)
             } else {
                 None
             }
@@ -1077,7 +1308,7 @@ impl DictionaryStack {
             // Same match-any semantics as the scan below (best keyfit
             // across primary + aliases), merged in ascending row order so
             // first-wins display is identical.
-            self.merge_indexed(digits, layout_id, mapping, neighbor_on, &mut merged);
+            self.merge_indexed(digits, layout_id, mapping, opts, &mut merged);
         } else {
             // Legacy per-entry scan: custom layouts with no index, or a
             // layout whose FST failed to build (explicit error via
@@ -1124,13 +1355,13 @@ impl DictionaryStack {
             let primary = enc_buf.as_str();
             let keyfit = if primary == digits {
                 1.0
-            } else if primary.starts_with(digits) {
-                0.9
-            } else if neighbor_on
+            } else if opts.include_prefix && primary.starts_with(digits) {
+                opts.prefix_keyfit
+            } else if opts.include_neighbor
                 && primary.len() == digits.len()
                 && mapping.is_one_edit_neighbor(digits, primary)
             {
-                0.6
+                opts.neighbor_keyfit
             } else {
                 continue;
             };
@@ -1165,30 +1396,21 @@ impl DictionaryStack {
                 }
             }
         }
+        merged
+    }
 
-        struct Scored {
-            word: String,
-            seq: String,
-            cat: String,
-            lang: String,
-            score: f64,
-            priority: i32,
-        }
+    /// Score union rows (blocked words skipped, sub-threshold scores
+    /// hidden), unsorted. Shared by [`Self::suggest_inner`] (which passes
+    /// the truncated set) and [`Self::probe_target_at`] (full set, no
+    /// truncate, so the true scored rank is observable).
+    fn score_rows(
+        &self,
+        items: Vec<MergedRow>,
+        prev: &str,
+        active_tab: &str,
+        now: i64,
+    ) -> Vec<Scored> {
         let mut scored: Vec<Scored> = Vec::new();
-        // Cap matches at 200 before the top-N heap (SPEC). The pre-truncate
-        // order must be a TOTAL order: `merged` is a HashMap (RandomState
-        // iteration), so sorting by `freq_base` alone lets equal-freq ties
-        // resolve to a different 200-set on every call. (freq desc, word
-        // asc, lang asc) is total over the dedupe key space.
-        let mut items: Vec<MergedRow> = merged.into_values().collect();
-        items.sort_by(|a, b| {
-            b.freq_base
-                .cmp(&a.freq_base)
-                .then_with(|| a.word.cmp(&b.word))
-                .then_with(|| a.lang.cmp(&b.lang))
-        });
-        items.truncate(200);
-
         for m in items {
             if self.personal.is_blocked(&m.word) {
                 continue;
@@ -1245,6 +1467,71 @@ impl DictionaryStack {
                 priority: m.priority,
             });
         }
+        scored
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn suggest_inner(
+        &self,
+        ctx: &str,
+        digits: &str,
+        active_tab: &str,
+        limit: usize,
+        layout_id: &str,
+        seqs_of: &dyn Fn(&DictEntry) -> (Cow<'_, str>, Cow<'_, [String]>),
+        mapping: &dyn KeyMapping,
+        opts: &SuggestOpts,
+        is_neighbor_edit: &dyn Fn(&str, &str) -> bool,
+        is_code: &dyn Fn(char) -> bool,
+        now: i64,
+    ) -> Vec<Suggestion> {
+        if digits.is_empty() || !digits.chars().all(is_code) || limit == 0 {
+            return Vec::new();
+        }
+        debug_assert!(
+            (0.0..=1.0).contains(&opts.prefix_keyfit),
+            "SuggestOpts::prefix_keyfit out of range: {}",
+            opts.prefix_keyfit
+        );
+        debug_assert!(
+            (0.0..=1.0).contains(&opts.neighbor_keyfit),
+            "SuggestOpts::neighbor_keyfit out of range: {}",
+            opts.neighbor_keyfit
+        );
+        let prev = ctx.split_whitespace().last().unwrap_or("").to_lowercase();
+
+        // Union construction lives in `build_union` (shared with the probe);
+        // the merged set is already match-any over (primary, aliases).
+        let mut merged = self.build_union(
+            digits,
+            layout_id,
+            seqs_of,
+            mapping,
+            opts,
+            is_neighbor_edit,
+        );
+        // Hard tab filter (code-tab experiment): scope the candidate set to
+        // the active tab BEFORE the freq truncate, so cross-tab distractors
+        // neither occupy truncate slots nor win ranking ties.
+        if opts.hard_tab_filter {
+            merged.retain(|_, m| m.cat == active_tab);
+        }
+
+        // Cap matches at 200 before the top-N heap (SPEC). The pre-truncate
+        // order must be a TOTAL order: `merged` is a HashMap (RandomState
+        // iteration), so sorting by `freq_base` alone lets equal-freq ties
+        // resolve to a different 200-set on every call. (freq desc, word
+        // asc, lang asc) is total over the dedupe key space.
+        let mut items: Vec<MergedRow> = merged.into_values().collect();
+        items.sort_by(|a, b| {
+            b.freq_base
+                .cmp(&a.freq_base)
+                .then_with(|| a.word.cmp(&b.word))
+                .then_with(|| a.lang.cmp(&b.lang))
+        });
+        items.truncate(200);
+
+        let mut scored = self.score_rows(items, &prev, active_tab, now);
 
         // Real top-N heap (plan/05 #3): `select_nth_unstable` partitions the
         // top `limit` in O(n) instead of fully sorting, then only the
@@ -1252,15 +1539,7 @@ impl DictionaryStack {
         // lexicographic, priority, lang) keeps every tie deterministic;
         // the input order is already total (freq desc, word, lang), so the
         // partition itself is repeat-stable.
-        let mut scored_cmp = |a: &Scored, b: &Scored| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.word.len().cmp(&b.word.len()))
-                .then_with(|| a.word.cmp(&b.word))
-                .then_with(|| b.priority.cmp(&a.priority))
-                .then_with(|| a.lang.cmp(&b.lang))
-        };
+        let mut scored_cmp = |a: &Scored, b: &Scored| cmp_scored(a, b);
         if scored.len() > limit {
             scored.select_nth_unstable_by(limit, &mut scored_cmp);
             scored.truncate(limit);
@@ -1339,20 +1618,25 @@ impl DictionaryStack {
     /// Rows merge straight into the union — no intermediate hit
     /// map, no second sort: [`Self::merge_row`] is insertion-order
     /// independent, so FST-stream order needs no reordering.
-    /// `neighbor_on == false` skips generation (the gate's precision arm).
+    /// `opts.include_neighbor == false` skips generation (the gate's
+    /// precision arm); `opts.include_prefix == false` skips the FST prefix
+    /// page and cached prefix rows (the prefix-toggle experiment).
     ///
     /// Prefix-result cache: exact+prefix row sets memoize per
-    /// `(layout_id, digits)` (cap 16, behavior-neutral). An exact hit
-    /// merges the set directly; a parent (`digits` minus one code) hit
-    /// filters the parent set with borrow-only keyfit checks instead of
-    /// re-running the FST page. Neighbors regenerate every keystroke
-    /// (cheap: `len x ~8` lookups) on all three paths.
+    /// `(layout_id, digits)` (cap 16, behavior-neutral under a FIXED opts:
+    /// tags are reinterpreted through the current `opts` at merge time, and
+    /// prefix rows are skipped outright when `include_prefix` is false, so
+    /// mixed-opts call sequences still return identical output to cold
+    /// runs). An exact hit merges the set directly; a parent (`digits`
+    /// minus one code) hit filters the parent set with borrow-only keyfit
+    /// checks instead of re-running the FST page. Neighbors regenerate
+    /// every keystroke (cheap: `len x ~8` lookups) on all three paths.
     fn merge_indexed(
         &self,
         digits: &str,
         layout_id: &str,
         mapping: &dyn KeyMapping,
-        neighbor_on: bool,
+        opts: &SuggestOpts,
         merged: &mut HashMap<String, MergedRow>,
     ) {
         let postings = self.seq_postings.get(layout_id).unwrap_or_else(|| {
@@ -1367,18 +1651,28 @@ impl DictionaryStack {
             let cache = self.prefix_cache.borrow();
             if let Some(rows) = cache.get(&key) {
                 for &(idx, tag) in rows.iter() {
+                    if tag != 1 && !opts.include_prefix {
+                        continue;
+                    }
                     let e = self.row(idx);
                     Self::merge_row(
                         merged,
                         idx,
                         e,
                         e.seq_for_layout(layout_id).to_string(),
-                        if tag == 1 { 1.0 } else { 0.9 },
+                        if tag == 1 { 1.0 } else { opts.prefix_keyfit },
                     );
                 }
                 drop(cache);
-                if neighbor_on {
-                    self.merge_neighbors(digits, layout_id, mapping, postings, merged);
+                if opts.include_neighbor {
+                    self.merge_neighbors(
+                        digits,
+                        layout_id,
+                        mapping,
+                        postings,
+                        opts.neighbor_keyfit,
+                        merged,
+                    );
                 }
                 return;
             }
@@ -1395,7 +1689,7 @@ impl DictionaryStack {
                         let primary = e.seq_for_layout(layout_id);
                         if primary == digits {
                             tag = Some(1);
-                        } else if primary.starts_with(digits) {
+                        } else if opts.include_prefix && primary.starts_with(digits) {
                             tag = Some(0);
                         }
                         if tag != Some(1) {
@@ -1403,7 +1697,7 @@ impl DictionaryStack {
                                 if a.as_str() == digits {
                                     tag = Some(1);
                                     break;
-                                } else if a.starts_with(digits) {
+                                } else if opts.include_prefix && a.starts_with(digits) {
                                     tag = tag.or(Some(0));
                                 }
                             }
@@ -1415,7 +1709,7 @@ impl DictionaryStack {
                                 idx,
                                 e,
                                 e.seq_for_layout(layout_id).to_string(),
-                                if t == 1 { 1.0 } else { 0.9 },
+                                if t == 1 { 1.0 } else { opts.prefix_keyfit },
                             );
                         }
                     }
@@ -1426,8 +1720,15 @@ impl DictionaryStack {
                         cache.clear();
                     }
                     cache.insert(key, mine);
-                    if neighbor_on {
-                        self.merge_neighbors(digits, layout_id, mapping, postings, merged);
+                    if opts.include_neighbor {
+                        self.merge_neighbors(
+                            digits,
+                            layout_id,
+                            mapping,
+                            postings,
+                            opts.neighbor_keyfit,
+                            merged,
+                        );
                     }
                     return;
                 }
@@ -1437,6 +1738,8 @@ impl DictionaryStack {
         // exact+prefix set for the cache. Phases run exact-first so the
         // common top hit never waits on the prefix page; `merge_row`
         // takes the max keyfit, so phase order cannot change the result.
+        // The prefix page is skipped outright when `include_prefix` is
+        // false (exact-only experiment arm).
         let mut mine: Vec<(u32, u8)> = Vec::new();
         if let Some(rows) = postings.get(digits) {
             for &r in rows {
@@ -1445,26 +1748,28 @@ impl DictionaryStack {
                 mine.push((r, 1));
             }
         }
-        if let Some(set) = self.fst_by_layout.get(layout_id) {
-            let auto = fst::automaton::Str::new(digits).starts_with();
-            let mut stream = set.search(auto).into_stream();
-            use fst::{Automaton, IntoStreamer, Streamer};
-            while let Some(k) = stream.next() {
-                if let Ok(s) = std::str::from_utf8(k) {
-                    if s == digits {
-                        continue;
-                    }
-                    if let Some(rows) = postings.get(s) {
-                        for &r in rows {
-                            let e = self.row(r);
-                            Self::merge_row(
-                                merged,
-                                r,
-                                e,
-                                e.seq_for_layout(layout_id).to_string(),
-                                0.9,
-                            );
-                            mine.push((r, 0));
+        if opts.include_prefix {
+            if let Some(set) = self.fst_by_layout.get(layout_id) {
+                let auto = fst::automaton::Str::new(digits).starts_with();
+                let mut stream = set.search(auto).into_stream();
+                use fst::{Automaton, IntoStreamer, Streamer};
+                while let Some(k) = stream.next() {
+                    if let Ok(s) = std::str::from_utf8(k) {
+                        if s == digits {
+                            continue;
+                        }
+                        if let Some(rows) = postings.get(s) {
+                            for &r in rows {
+                                let e = self.row(r);
+                                Self::merge_row(
+                                    merged,
+                                    r,
+                                    e,
+                                    e.seq_for_layout(layout_id).to_string(),
+                                    opts.prefix_keyfit,
+                                );
+                                mine.push((r, 0));
+                            }
                         }
                     }
                 }
@@ -1481,22 +1786,31 @@ impl DictionaryStack {
             }
             cache.insert(key, mine);
         }
-        if neighbor_on {
-            self.merge_neighbors(digits, layout_id, mapping, postings, merged);
+        if opts.include_neighbor {
+            self.merge_neighbors(
+                digits,
+                layout_id,
+                mapping,
+                postings,
+                opts.neighbor_keyfit,
+                merged,
+            );
         }
     }
 
     /// Generative 1-edit neighbor expansion: every single-code
     /// substitution to an adjacent key becomes an exact posting-list
     /// lookup (`len x ~8` lookups, zero per-entry allocs beyond the one
-    /// reused variant buffer). Hits merge at keyfit 0.6 (`merge_row`
-    /// keeps the max, so exact/prefix matches from other phases win).
+    /// reused variant buffer). Hits merge at `neighbor_keyfit`
+    /// (`merge_row` keeps the max, so exact/prefix matches from other
+    /// phases win).
     fn merge_neighbors(
         &self,
         digits: &str,
         layout_id: &str,
         mapping: &dyn KeyMapping,
         postings: &HashMap<String, Vec<u32>>,
+        neighbor_keyfit: f64,
         merged: &mut HashMap<String, MergedRow>,
     ) {
         let mut variant = String::with_capacity(digits.len() + 1);
@@ -1509,7 +1823,13 @@ impl DictionaryStack {
                 if let Some(rows) = postings.get(variant.as_str()) {
                     for &r in rows {
                         let e = self.row(r);
-                        Self::merge_row(merged, r, e, e.seq_for_layout(layout_id).to_string(), 0.6);
+                        Self::merge_row(
+                            merged,
+                            r,
+                            e,
+                            e.seq_for_layout(layout_id).to_string(),
+                            neighbor_keyfit,
+                        );
                     }
                 }
             }
@@ -1659,6 +1979,107 @@ mod tests {
                 assert_eq!(words(chained_off), words(expect_off), "chain-off {layout_id} {digits}");
             }
         }
+    }
+
+    #[test]
+    fn opts_default_parity_with_legacy_arms() {
+        // `SuggestOpts::default()` must reproduce `suggest` exactly, and
+        // `neighbor_off()` must reproduce `suggest_no_neighbor_at`, across
+        // exact / prefix / neighbor / miss shapes (frozen-behavior lock).
+        let stack = DictionaryStack::new(base());
+        let now = crate::personal::now_quantized();
+        let words = |s: Vec<Suggestion>| {
+            s.into_iter().map(|x| (x.word, x.score.to_bits())).collect::<Vec<_>>()
+        };
+        for digits in ["4", "43", "435", "4355", "43556", "43555", "999"] {
+            assert_eq!(
+                words(stack.suggest_at("", digits, "EN", 5, now)),
+                words(stack.suggest_with_opts_at("", digits, "EN", 5, now, &SuggestOpts::default())),
+                "default-opts parity at {digits}",
+            );
+            assert_eq!(
+                words(stack.suggest_no_neighbor_at("", digits, "EN", 5, now)),
+                words(stack.suggest_with_opts_at("", digits, "EN", 5, now, &SuggestOpts::neighbor_off())),
+                "neighbor-off parity at {digits}",
+            );
+        }
+    }
+
+    #[test]
+    fn exact_only_is_subset_of_default() {
+        // Disabling prefix+neighbor can only remove candidates, never add
+        // or reorder survivors (same union minus prefix/neighbor rows, same
+        // scores, same total order).
+        let stack = DictionaryStack::new(base());
+        let now = crate::personal::now_quantized();
+        for digits in ["4", "43", "435", "4355", "43556"] {
+            let full = stack.suggest_with_opts_at("", digits, "EN", 5, now, &SuggestOpts::default());
+            let exact = stack.suggest_with_opts_at("", digits, "EN", 5, now, &SuggestOpts::exact_only());
+            assert!(exact.len() <= full.len(), "exact-only must not add rows at {digits}");
+            for s in &exact {
+                assert!(
+                    full.iter().any(|f| f.word == s.word && f.score == s.score),
+                    "exact-only row {:?} must survive identically in default at {digits}",
+                    s.word
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_opts_cache_sequences_match_cold_runs() {
+        // The prefix cache reinterprets tags through the CURRENT opts, so
+        // alternating opts across keystrokes must equal cold-cache runs.
+        let stack = DictionaryStack::new(base());
+        let now = crate::personal::now_quantized();
+        let words = |s: Vec<Suggestion>| {
+            s.into_iter().map(|x| (x.word, x.score.to_bits())).collect::<Vec<_>>()
+        };
+        let dflt = SuggestOpts::default();
+        let off = SuggestOpts::neighbor_off();
+        let exact = SuggestOpts::exact_only();
+        // Warm the cache with interleaved opts (prefix-bearing + exact-only).
+        for digits in ["4", "43", "435", "4355"] {
+            stack.suggest_with_opts_at("", digits, "EN", 5, now, &dflt);
+            stack.suggest_with_opts_at("", digits, "EN", 5, now, &exact);
+            stack.suggest_with_opts_at("", digits, "EN", 5, now, &off);
+        }
+        for digits in ["4", "43", "435", "4355", "43556"] {
+            for opts in [&dflt, &off, &exact] {
+                let fresh = DictionaryStack::new(base());
+                assert_eq!(
+                    words(stack.suggest_with_opts_at("", digits, "EN", 5, now, opts)),
+                    words(fresh.suggest_with_opts_at("", digits, "EN", 5, now, opts)),
+                    "mixed-opts cache mismatch at {digits}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn probe_agrees_with_suggest_ranks() {
+        // `probe_target_at` top_rank must reproduce the real output rank,
+        // and the stage flags must be self-consistent.
+        let stack = DictionaryStack::new(base());
+        let now = crate::personal::now_quantized();
+        let opts = SuggestOpts::default();
+        for (digits, target) in [("4355", "hello"), ("4355", "hell"), ("999", "hello")] {
+            let p = stack.probe_target_at("", digits, "EN", target, 5, now, &opts);
+            let rank = stack
+                .suggest_with_opts_at("", digits, "EN", 5, now, &opts)
+                .iter()
+                .position(|s| s.word == target)
+                .map(|i| i + 1);
+            assert_eq!(p.top_rank, rank, "probe/suggest rank mismatch for {target}");
+            assert_eq!(p.in_union, p.pre_truncate_rank.is_some());
+            assert_eq!(p.in_truncate200, p.pre_truncate_rank.map(|r| r <= 200).unwrap_or(false));
+            if p.in_union {
+                assert!(p.keyfit.is_some());
+            }
+        }
+        // Invalid input yields an all-absent probe, never a panic.
+        let bad = stack.probe_target_at("", "", "EN", "hello", 5, now, &opts);
+        assert!(!bad.in_union && bad.top_rank.is_none());
     }
 
     #[test]
