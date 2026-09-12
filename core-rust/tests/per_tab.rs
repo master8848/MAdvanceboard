@@ -149,10 +149,15 @@ fn per_tab_report() {
     let spots = [
         ("hello", encode_word("hello"), "words"),       // 43556
         ("function", encode_word("function"), "js"),    // 386...
+        ("interface", encode_word("interface"), "js"),  // TS keyword (js pack)
+        ("addEventListener", encode_word("addEventListener"), "js"), // DOM
         ("fn", encode_word("fn"), "rust"),              // 36
         ("div", encode_word("div"), "html"),            // 348
         ("❤️", "432".to_string(), "emoji"),              // hea
+        ("❤️", encode_word("heart"), "emoji"),           // full "heart" via alt
+        ("💔", encode_word("heartbreak"), "emoji"),      // full "heartbreak"
         ("\\alpha", "257".to_string(), "math"),          // alp
+        ("\\alpha", encode_word("alpha"), "math"),       // full "alpha" via alt
         ("fever", encode_word("fever"), "medical"),     // 33837
     ];
     println!("== spot checks (full-seq rank in top-30) ==");

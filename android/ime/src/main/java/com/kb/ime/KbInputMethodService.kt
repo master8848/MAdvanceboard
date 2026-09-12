@@ -212,15 +212,15 @@ class KbInputMethodService : InputMethodService() {
     /**
      * Engine bring-up off the main thread (asset I/O + wordlist parse +
      * per-pack FST rebuild). Merges `words[]` of [BASE_PACK_ASSETS] into one
-     * base JSON array for `Predictor.new`, loads `layouts/cat_map.json`,
-     * then [PredictorFactory.create] (no per-word FFI — batch strings).
+     * base JSON array for `Predictor.new`, installs [EXTENSION_PACK_ASSETS]
+     * envelopes (`assets/categories/<id>.json`, words embedded) via
+     * `add_pack_json` in priority order, then loads `layouts/cat_map.json`
+     * and calls [PredictorFactory.create] (no per-word FFI — batch strings).
      * Real engine → [engineStatus] = null. ANY failure (missing asset,
-     * malformed pack, missing `.so`) → degraded stub + [engineStatus]
-     * carries the cause for the status line + gesture log.
-     *
-     * Extension packs (js/rust/html/emoji/numbers/math/medical) are NOT
-     * bundled yet — their tabs rank base + personal only until the pack
-     * wiring lands (explicit gap, tracked in the FFI handoff report).
+     * malformed pack, missing `.so`, non-empty `takeLastLayoutError` after
+     * install) → degraded stub + [engineStatus] carries the cause for the
+     * status line + gesture log. Pack/cat-map failures are never silent:
+     * [PredictorFactory] fails the whole decision with the pack id + cause.
      */
     private fun initEngine() {
         engineStatus = "Engine loading…"
@@ -228,8 +228,9 @@ class KbInputMethodService : InputMethodService() {
         serviceScope.launch {
             val decision = try {
                 val baseJson = loadBaseWordlist()
+                val packs = loadExtensionPacks()
                 val catMap = loadAssetTextOrNull("layouts/cat_map.json")
-                PredictorFactory.create(baseJson, emptyList(), catMap)
+                PredictorFactory.create(baseJson, packs, catMap)
             } catch (e: Exception) {
                 PredictorFactory.Decision.Degraded(
                     StubPredictor(),
@@ -289,6 +290,26 @@ class KbInputMethodService : InputMethodService() {
             assets.open(path).bufferedReader().use { it.readText() }
         } catch (_: Exception) {
             null
+        }
+
+    /**
+     * Extension pack envelopes (`assets/categories/<id>.json`, `words`
+     * embedded by `scripts/sync_android_assets.py`) as
+     * `(packJson, priority)` for `PredictorFactory.create`. A missing
+     * asset throws loudly — the factory turns it into a degraded engine
+     * WITH the cause (status line), never a half-loaded stack. Rust-side
+     * `add_pack_json` parses these envelopes as `PackFile` (extra manifest
+     * fields ignored); a malformed pack or unknown layout affinity fails
+     * the whole factory decision the same loud way.
+     */
+    private fun loadExtensionPacks(): List<Pair<String, Int>> =
+        EXTENSION_PACK_ASSETS.map { (path, priority) ->
+            val text = try {
+                assets.open(path).bufferedReader().use { it.readText() }
+            } catch (e: Exception) {
+                throw IllegalStateException("IME asset missing: $path (${e.message})")
+            }
+            text to priority
         }
 
     /**
@@ -1128,6 +1149,23 @@ class KbInputMethodService : InputMethodService() {
         val BASE_PACK_ASSETS: List<String> = listOf(
             "packs/words_en.json",
             "packs/nepali.json"
+        )
+
+        /**
+         * Extension packs installed via `add_pack_json` at engine bring-up
+         * (`(asset path, priority)`; envelopes carry manifest + `words`).
+         * Priorities mirror `core-rust/tests/per_tab.rs` CORPUS so
+         * on-device tie-breaks match the core per-tab report (numbers 15,
+         * js 20, rust 25, html 30, emoji 40, math 50, medical 60).
+         */
+        val EXTENSION_PACK_ASSETS: List<Pair<String, Int>> = listOf(
+            "categories/numbers.json" to 15,
+            "categories/js.json" to 20,
+            "categories/rust.json" to 25,
+            "categories/html.json" to 30,
+            "categories/emoji.json" to 40,
+            "categories/math.json" to 50,
+            "categories/medical.json" to 60
         )
 
         /**
