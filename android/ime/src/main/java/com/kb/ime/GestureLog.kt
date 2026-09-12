@@ -15,6 +15,11 @@ import java.io.File
  * them to a user-visible status line in Gesture Tuning, and log-stats read
  * failures return [LogStats] with `unreadable=true` instead of zeros that
  * would look like "no false triggers".
+ *
+ * The file is bounded: appends past [MAX_LOG_BYTES] rotate to the newest
+ * half of lines plus one `log/rotated` marker line carrying the kept/total
+ * counts, so the tuning signal can never grow the app's disk footprint
+ * without bound.
  */
 class GestureLog(
     private val context: Context,
@@ -41,9 +46,30 @@ class GestureLog(
             append(",\"detail\":\"").append(detail.replace("\"", "'")).append("\"}")
         }
         try {
-            file().appendText(line + "\n")
+            val f = file()
+            f.appendText(line + "\n")
+            if (f.length() > MAX_LOG_BYTES) rotate(f)
         } catch (e: Exception) {
             onError("Gesture log write failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Drops the oldest half of lines once the log passes [MAX_LOG_BYTES],
+     * keeping a `log/rotated` marker with kept/total counts so the trim is
+     * observable in stats instead of a silent hole. Never throws.
+     */
+    private fun rotate(f: File) {
+        try {
+            val lines = f.readLines()
+            if (lines.size <= 1) return
+            val keep = lines.takeLast(lines.size / 2)
+            val marker = "{\"ts\":" + System.currentTimeMillis() +
+                ",\"zone\":\"pad\",\"gesture\":\"log\",\"action\":\"rotated\"," +
+                "\"detail\":\"kept ${keep.size} of ${lines.size}\"}"
+            f.writeText((listOf(marker) + keep).joinToString("\n", postfix = "\n"))
+        } catch (e: Exception) {
+            onError("Gesture log rotation failed: ${e.message}")
         }
     }
 
@@ -86,5 +112,8 @@ class GestureLog(
 
     companion object {
         val ZONES = setOf("pad", "bar", "tabs", "qwerty")
+
+        /** Append-only tuning log never exceeds this on disk (see [rotate]). */
+        const val MAX_LOG_BYTES = 256 * 1024
     }
 }
