@@ -233,7 +233,10 @@ impl Predictor {
             .unwrap_or_else(|e| panic!("Predictor::take_last_layout_error: lock poisoned: {e}"))
     }
 
-    /// Register a custom layout from a `layouts/*.json` document.
+    /// Register a custom layout from a `layouts/<id>.json` document.
+    /// (Spelled to avoid a literal `*` after `/`: that two-character
+    /// sequence would terminate the Kotlin KDoc block in the
+    /// `uniffi-bindgen` output and break `:core-bridge` compilation.)
     /// Returns the new id; malformed documents are an explicit panic.
     /// Rust callers wanting `Result` use [`Self::try_register_layout`].
     pub fn register_layout(&self, json: String) -> String {
