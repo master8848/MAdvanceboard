@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -233,18 +235,23 @@ data class FallbackActions(
  */
 @Composable
 fun FallbackActionBar(actions: FallbackActions, modifier: Modifier = Modifier) {
+    // Every button is forced to 48dp minimum (TextButton defaults to 40dp
+    // height — below the plan 01 accessibility target).
+    val minTarget = Modifier
+        .heightIn(min = 48.dp)
+        .widthIn(min = 48.dp)
     Row(
         modifier = modifier
             .fillMaxWidth()
             .padding(4.dp),
         horizontalArrangement = Arrangement.SpaceEvenly
     ) {
-        TextButton(onClick = actions.onDelete) { Text("Delete") }
-        TextButton(onClick = actions.onSpace) { Text("Space") }
-        TextButton(onClick = actions.onAcceptFirst) { Text("Accept #1") }
-        TextButton(onClick = actions.onNextCategory) { Text("Next cat") }
-        TextButton(onClick = actions.onToggleQwerty) { Text("QWERTY") }
-        TextButton(onClick = actions.onSym) { Text("Sym") }
+        TextButton(onClick = actions.onDelete, modifier = minTarget) { Text("Delete") }
+        TextButton(onClick = actions.onSpace, modifier = minTarget) { Text("Space") }
+        TextButton(onClick = actions.onAcceptFirst, modifier = minTarget) { Text("Accept #1") }
+        TextButton(onClick = actions.onNextCategory, modifier = minTarget) { Text("Next cat") }
+        TextButton(onClick = actions.onToggleQwerty, modifier = minTarget) { Text("QWERTY") }
+        TextButton(onClick = actions.onSym, modifier = minTarget) { Text("Sym") }
     }
 }
 
