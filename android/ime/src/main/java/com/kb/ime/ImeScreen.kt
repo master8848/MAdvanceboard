@@ -101,6 +101,10 @@ fun ImeScreen(
                 candidates = candidates,
                 onPick = onCandidatePicked,
                 onAcceptFirst = onAcceptFirst,
+                onExpandAll = {
+                    expanded = true
+                    onExpandAll()
+                },
                 onFling = onFling,
                 modifier = Modifier.weight(1f)
             )

@@ -1,7 +1,7 @@
 package com.kb.ime
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -16,7 +16,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import kotlin.math.abs
 
 /**
  * SuggestionBar (plan 01 zone: tap + horizontal fling ONLY).
@@ -35,6 +37,7 @@ fun SuggestionStrip(
     candidates: List<String>,
     onPick: (String) -> Unit,
     onAcceptFirst: () -> Unit = {},
+    onExpandAll: () -> Unit = {},
     onFling: (zone: String, gesture: String, action: String) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
@@ -46,29 +49,45 @@ fun SuggestionStrip(
     } else {
         candidates.drop((page % pageCount.coerceAtLeast(1)) * pageSize).take(pageSize)
     }
-    var dragTotal by remember { mutableIntStateOf(0) }
+    val density = LocalDensity.current
+    // Single drag classifier (both axes): horizontal → accept/cycle,
+    // swipe-up → expand-all sheet. Vertical down is ignored (no action).
+    var dragX by remember { mutableIntStateOf(0) }
+    var dragY by remember { mutableIntStateOf(0) }
 
     Column(modifier = modifier.fillMaxWidth()) {
         LazyRow(
             modifier = Modifier
                 .fillMaxWidth()
                 .pointerInput(candidates) {
-                    detectHorizontalDragGestures(
-                        onDragStart = { dragTotal = 0 },
+                    detectDragGestures(
+                        onDragStart = { dragX = 0; dragY = 0 },
                         onDragEnd = {
-                            if (dragTotal > 0) {
-                                onFling("bar", "fling-right", "accept-#1")
-                                onAcceptFirst()
-                            } else if (dragTotal < 0) {
-                                if (pageCount > 1) {
-                                    page = (page + 1) % pageCount
+                            val upThresholdPx = with(density) { 24.dp.toPx() }
+                            if (abs(dragX) >= abs(dragY)) {
+                                if (dragX > 0) {
+                                    onFling("bar", "fling-right", "accept-#1")
+                                    onAcceptFirst()
+                                } else if (dragX < 0) {
+                                    if (pageCount > 1) {
+                                        page = (page + 1) % pageCount
+                                    }
+                                    onFling("bar", "fling-left", "cycle-overflow")
                                 }
-                                onFling("bar", "fling-left", "cycle-overflow")
+                            } else if (dragY < -upThresholdPx) {
+                                onFling("bar", "swipe-up", "expand-all")
+                                onExpandAll()
                             }
-                            dragTotal = 0
+                            dragX = 0
+                            dragY = 0
                         },
-                        onDragCancel = { dragTotal = 0 },
-                        onHorizontalDrag = { _, delta -> dragTotal += delta.toInt() }
+                        onDragCancel = { dragX = 0; dragY = 0 },
+                        onDrag = { _, amount ->
+                            // No consume(): the 3-item row fits without scrolling,
+                            // so there is no scroll competitor for this stream.
+                            dragX += amount.x.toInt()
+                            dragY += amount.y.toInt()
+                        }
                     )
                 }
         ) {

@@ -38,7 +38,8 @@ class QwertyView @JvmOverloads constructor(
         this,
         listener = object : PadGestureDetector.Listener() {
             override fun onFlingRight() = onFlingAccept()
-            override fun onGestureRejected(reason: String) = onGestureRejected(reason)
+            override fun onGestureRejected(reason: String) =
+                this@QwertyView.onGestureRejected(reason)
         }
     ).apply { flingsEnabled = PadGestureDetector.FlingGate.ACCEPT_ONLY }
 

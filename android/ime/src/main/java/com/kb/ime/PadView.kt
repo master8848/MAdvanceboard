@@ -73,16 +73,18 @@ open class PadView @JvmOverloads constructor(
 
     private val gestureListener = object : PadGestureDetector.Listener() {
         override fun onFlingLeftSlideStart() = Unit
-        override fun onDeleteSlide(wordsToSelect: Int) = onDeleteSlide(wordsToSelect)
+        override fun onDeleteSlide(wordsToSelect: Int) =
+            this@PadView.onDeleteSlide(wordsToSelect)
         override fun onDeleteRelease(wordsToSelect: Int) = onFlingDelete(wordsToSelect)
         override fun onFlingUp() = onFlingSpace()
         override fun onFlingRight() = onFlingAccept()
         override fun onFlingDown() = onFlingHide()
         override fun onKeyLongPress() {
             val key = keyAt(lastDownX, lastDownY)
-            onKeyLongPress(key?.code.orEmpty(), key?.symbols.orEmpty())
+            this@PadView.onKeyLongPress(key?.code.orEmpty(), key?.symbols.orEmpty())
         }
-        override fun onGestureRejected(reason: String) = onGestureRejected(reason)
+        override fun onGestureRejected(reason: String) =
+            this@PadView.onGestureRejected(reason)
     }
     private val gestures = PadGestureDetector(this, listener = gestureListener)
     private var lastDownX = 0f
