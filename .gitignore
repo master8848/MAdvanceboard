@@ -1,0 +1,9 @@
+target/
+sessions/
+*.gz
+.gradle/
+android/**/build/
+**/__pycache__/
+*.pyc
+.mise/
+.DS_Store
