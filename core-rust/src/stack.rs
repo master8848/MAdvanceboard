@@ -403,7 +403,11 @@ impl DictEntry {
 
 /// One unioned suggest candidate (module scope so the merge helpers can
 /// name it): deduped on the row's precomputed `norm_key`, frequencies
-/// summed, display from the highest-priority row, best keyfit.
+/// summed, display from the highest-priority row (ties: smallest row
+/// index), best keyfit, match seq from the smallest contributing row
+/// index. The index rules make the merge insertion-order independent, so
+/// the indexed path (FST-stream order) and the scan path (row order)
+/// produce byte-identical unions.
 struct MergedRow {
     word: String,
     seq: String,
@@ -417,6 +421,12 @@ struct MergedRow {
     /// `base_q` of the sole contributor (valid iff `contributors == 1`):
     /// the quantized `log10` skip.
     single_q: u16,
+    /// Row index behind the display word/cat (highest priority, ties to
+    /// the smallest index). `u32::MAX` for personal-only rows.
+    first_idx: u32,
+    /// Smallest contributing row index: the match-`seq` source.
+    /// `u32::MAX` for personal-only rows (seq stored directly).
+    min_idx: u32,
 }
 
 /// Scored candidate returned to the UI / UniFFI.
@@ -1050,12 +1060,14 @@ impl DictionaryStack {
             // Legacy per-entry scan: custom layouts with no index, or a
             // layout whose FST failed to build (explicit error via
             // `fst_build_error`, never a silent wrong-layout scan).
-            for e in self.base.iter().chain(self.extensions.iter()) {
+            // Ascending row indexes feed `merge_row`, matching the indexed
+            // path's tie rules exactly.
+            for (idx, e) in self.base.iter().chain(self.extensions.iter()).enumerate() {
                 let (primary, aliases) = seqs_of(e);
                 let Some(keyfit) = keyfit_any(&primary, &aliases) else {
                     continue;
                 };
-                Self::merge_row(&mut merged, e, primary.into_owned(), keyfit);
+                Self::merge_row(&mut merged, idx as u32, e, primary.into_owned(), keyfit);
             }
         }
 
@@ -1072,6 +1084,14 @@ impl DictionaryStack {
         // skeleton, and only a word unencodable under both is skipped.
         let mut enc_buf = String::new();
         for p in self.personal.live_entries() {
+            // Length gate: a word emits at most one code per char, so a
+            // word with fewer chars than the digit string can never be an
+            // exact, prefix, or same-length neighbor match. Skips the
+            // encode + map work. (Char counts on both sides: sound for
+            // multi-byte custom codes too.)
+            if p.word.chars().count() < digits.chars().count() {
+                continue;
+            }
             mapping.encode_word_into(&p.word, &mut enc_buf);
             if enc_buf.is_empty() {
                 enc_buf.push_str(&encode_word(&p.word));
@@ -1116,6 +1136,8 @@ impl DictionaryStack {
                             keyfit,
                             contributors: 0,
                             single_q: 0,
+                            first_idx: u32::MAX,
+                            min_idx: u32::MAX,
                         },
                     );
                 }
@@ -1236,18 +1258,33 @@ impl DictionaryStack {
 
     /// Fold one static row into the suggest union keyed by the row's
     /// precomputed `norm_key` (no `format!`/`to_lowercase` per match).
-    /// Frequencies sum, display follows the highest-priority row (ties keep
-    /// the first row in scan/index order — both are row order, so the
-    /// outcome is identical), keyfit takes the max.
-    fn merge_row(merged: &mut HashMap<String, MergedRow>, e: &DictEntry, seq: String, keyfit: f64) {
+    /// Frequencies sum, display follows the highest-priority row (ties to
+    /// the smallest row index — both scan and indexed paths pass true row
+    /// indexes, so the outcome is identical regardless of visit order),
+    /// keyfit takes the max, `seq` comes from the smallest contributing
+    /// row (what the legacy ascending scan stored first).
+    fn merge_row(
+        merged: &mut HashMap<String, MergedRow>,
+        idx: u32,
+        e: &DictEntry,
+        seq: String,
+        keyfit: f64,
+    ) {
         match merged.get_mut(&e.norm_key) {
             Some(m) => {
                 m.freq_base += e.freq;
                 m.contributors += 1;
-                if e.priority > m.priority {
+                if idx < m.min_idx {
+                    m.min_idx = idx;
+                    m.seq = seq;
+                }
+                if e.priority > m.priority
+                    || (e.priority == m.priority && idx < m.first_idx)
+                {
                     m.cat = e.cat.clone();
                     m.word = e.word.clone();
                     m.priority = e.priority;
+                    m.first_idx = idx;
                 }
                 if keyfit > m.keyfit {
                     m.keyfit = keyfit;
@@ -1266,6 +1303,8 @@ impl DictionaryStack {
                         keyfit,
                         contributors: 1,
                         single_q: e.base_q,
+                        first_idx: idx,
+                        min_idx: idx,
                     },
                 );
             }
@@ -1275,9 +1314,10 @@ impl DictionaryStack {
     /// Indexed match (plan/05 #1-2): exact posting-list lookup + FST
     /// `StartsWith` prefix page + generative 1-edit neighbor expansion
     /// (`len x neighbor_codes` exact lookups, ~50 for 7-digit input).
-    /// Per-row best keyfit merges in ascending row order, reproducing the
-    /// legacy scan's first-wins display exactly. `neighbor_on == false`
-    /// skips generation (the gate's precision arm).
+    /// Rows merge straight into the union — no intermediate hit map, no
+    /// second sort: [`Self::merge_row`] is insertion-order independent, so
+    /// FST-stream order needs no reordering. `neighbor_on == false` skips
+    /// generation (the gate's precision arm).
     fn merge_indexed(
         &self,
         digits: &str,
@@ -1292,11 +1332,14 @@ impl DictionaryStack {
                  (guard with seq_postings.contains_key)"
             )
         });
-        // (row, best keyfit): exact 1.0, prefix 0.9, neighbor 0.6.
-        let mut hits: HashMap<u32, f64> = HashMap::new();
+        // (row, best keyfit): exact 1.0, prefix 0.9, neighbor 0.6. Phases
+        // run exact-first so the common top hit never waits on the prefix
+        // page; `merge_row` takes the max keyfit, so phase order cannot
+        // change the result.
         if let Some(rows) = postings.get(digits) {
             for &r in rows {
-                hits.insert(r, 1.0);
+                let e = self.row(r);
+                Self::merge_row(merged, r, e, e.seq_for_layout(layout_id).to_string(), 1.0);
             }
         }
         if let Some(set) = self.fst_by_layout.get(layout_id) {
@@ -1310,7 +1353,14 @@ impl DictionaryStack {
                     }
                     if let Some(rows) = postings.get(s) {
                         for &r in rows {
-                            hits.entry(r).or_insert(0.9);
+                            let e = self.row(r);
+                            Self::merge_row(
+                                merged,
+                                r,
+                                e,
+                                e.seq_for_layout(layout_id).to_string(),
+                                0.9,
+                            );
                         }
                     }
                 }
@@ -1326,18 +1376,18 @@ impl DictionaryStack {
                     variant.replace_range(i..i + c.len_utf8(), nc.encode_utf8(&mut nb));
                     if let Some(rows) = postings.get(variant.as_str()) {
                         for &r in rows {
-                            hits.entry(r).and_modify(|k| *k = (*k).max(0.6)).or_insert(0.6);
+                            let e = self.row(r);
+                            Self::merge_row(
+                                merged,
+                                r,
+                                e,
+                                e.seq_for_layout(layout_id).to_string(),
+                                0.6,
+                            );
                         }
                     }
                 }
             }
-        }
-        let mut idxs: Vec<u32> = hits.keys().copied().collect();
-        idxs.sort_unstable();
-        for idx in idxs {
-            let keyfit = hits[&idx];
-            let e = self.row(idx);
-            Self::merge_row(merged, e, e.seq_for_layout(layout_id).to_string(), keyfit);
         }
     }
 
