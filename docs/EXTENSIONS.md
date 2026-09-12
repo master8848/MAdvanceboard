@@ -1,5 +1,9 @@
 # Extensions — `.kbpack` Authoring Guide
 
+> Start here: **vocab (data-only, default)** → `VOCAB_SDK.md`;
+> **code plugins (privileged)** → `PLUGIN_SDK.md` (capability matrix +
+> separation rationale, §4). This page is the SPEC-format reference.
+
 Two formats exist. **SPEC format** (target, §3) is the open standard;
 **current MVP format** (what `core-rust/pack.rs` loads today) is a subset.
 
