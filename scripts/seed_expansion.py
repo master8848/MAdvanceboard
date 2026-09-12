@@ -433,10 +433,10 @@ def write_sources():
 
     rows = [{"w": p.split(":")[0], "tr": p.split(":")[1]}
             for p in NEPALI_NEW.split() if ":" in p]
-    with open(SRC / "nepali.csv", "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["w", "tr"])
-        w.writeheader()
-        w.writerows(rows)
+    # Nepali is pipeline-owned since plan/03 (scripts/build_ne_pack.py ->
+    # 8000-word packs/nepali.json v2.0.0). Never rewrite the pipeline's
+    # packs/sources/nepali.csv back to this 223-word curated list.
+    print(f"SKIP nepali.csv: pipeline-owned (plan/03); curated list kept in-code only")
 
     (SRC / "code_js.txt").write_text("\n".join(sorted(set(JS_NEW.split()))) + "\n",
                                      encoding="utf-8")
@@ -485,8 +485,10 @@ def main():
         str(SRC / "medical.txt"), "--out", str(P / "medical.json"),
         "--lang", "en", "--cat", "medical", "--version", "1.0.0",
         "--f0", "6000", "--alpha", "0.8", "--fmin", "150")
-    run("expand-pack", "--pack", str(P / "nepali.json"), "--in", str(SRC / "nepali.csv"),
-        "--f0", "5500", "--alpha", "0.8", "--fmin", "200")
+    # Nepali is pipeline-owned (plan/03 v2.0.0, 8000 words): expanding the
+    # curated 223 here would only rewrite freqs/sources, never add words
+    # (dedupe keeps existing rows). Skip to keep provenance clean.
+    print("$ build_pack.py expand-pack --pack nepali.json --in nepali.csv: SKIPPED (pipeline-owned)")
     run("expand-pack", "--pack", str(P / "code_js.json"), "--in", str(SRC / "code_js.txt"),
         "--f0", "4500", "--alpha", "0.7", "--fmin", "500")
     run("expand-pack", "--pack", str(P / "code_rust.json"), "--in", str(SRC / "code_rust.txt"),
@@ -497,8 +499,8 @@ def main():
         "--f0", "4500", "--alpha", "0.7", "--fmin", "800")
     run("expand-pack", "--pack", str(P / "math.json"), "--in", str(SRC / "math.csv"),
         "--f0", "4000", "--alpha", "0.7", "--fmin", "800")
-    # bump expanded pack versions to 1.1.0
-    for name in ("nepali", "code_js", "code_rust", "code_html", "emoji", "math"):
+    # bump expanded pack versions to 1.1.0 (nepali excluded: pipeline-owned v2.0.0)
+    for name in ("code_js", "code_rust", "code_html", "emoji", "math"):
         p = P / f"{name}.json"
         d = json.loads(p.read_text(encoding="utf-8"))
         d["version"] = "1.1.0"

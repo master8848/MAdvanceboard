@@ -1,10 +1,14 @@
 # Adding / expanding a dictionary pack (5 minutes)
 
 Tool: `scripts/build_pack.py` (stdlib only). Pack format: `{id, title,
-version, words[]}`, each word `{w, freq?, cat?, lang?, seq?, key?, tr?}`.
+version, words[]}`, each word `{w, freq?, cat?, lang?, seq?, key?, tr?, alt?}`.
 The Rust loader (`core-rust/src/pack.rs`) defaults `freq→100`,
-`cat→pack id`, `lang→"en"` and ignores `key`/`tr`. `seq` is required only
+`cat→pack id`, `lang→"en"` and ignores `key`. `seq` is required only
 when the display word itself is not T9-encodable (emoji, `\latex`).
+`tr` (Nepali romanization) is first-class: the loader prefers
+`encode(tr)` over `encode(w)` (plan/03); `alt` holds extra Roman
+spelling variants (`;`-separated in csv, list in JSON), each an
+additional match-any seq.
 
 Canonical ids: `words, ne, js, rust, html, emoji, numbers, math, medical`.
 New packs: pick a fresh lowercase id and add it to `CANONICAL_IDS` in
@@ -13,7 +17,7 @@ New packs: pick a fresh lowercase id and add it to `CANONICAL_IDS` in
 ## Add a brand-new dictionary
 
 1. Make a wordlist — `txt` (one `word [freq]` per line, `#` comments) or
-   `csv` with a `w` header plus optional `freq,cat,lang,seq,key,tr`:
+   `csv` with a `w` header plus optional `freq,cat,lang,seq,key,tr,alt`:
    ```text
    # packs/sources/mywords.txt
    hello 9000
@@ -57,7 +61,18 @@ afterwards and paste the new row into the counts table in `packs/README.md`.
 `scripts/seed_expansion.py` is the reproducible recipe: it writes
 `packs/sources/*` (curated lists; English tail filtered from the offline
 system wordlist `/usr/share/dict/web2`) and then drives `build` /
-`expand-pack` exactly as above. Re-run it to regenerate everything.
+`expand-pack` exactly as above. Re-run it to regenerate everything
+**except Nepali** (see below).
+
+**Nepali (`ne`, v2.0.0, 8000 words) is pipeline-owned, not seed-owned:**
+built by `scripts/build_ne_pack.py` from the HF
+`Saugatkafley/Nepali-Roman-Transliteration` train parquet (MIT, 2.4M
+`native↔english` rows) + Nepali-Wikipedia token counts for `freq`
+(Leipzig `nep_news_2019` was specified but is bot-walled; see the
+script header) + the 253 curated headwords pinned from the previous
+`nepali.json`. Do NOT re-run `seed_expansion.py`'s Nepali section
+against it (it would rewrite `packs/sources/nepali.csv` back to the
+223-word curated list); the script now skips Nepali itself.
 
 ## Memory / leanness rules
 

@@ -13,7 +13,7 @@ digit-sequence override for display words that are not encodable Latin text
 | File | Pack `id` | Title | Words | Notes |
 |---|---|---|---|---|
 | `words_en.json` | `words` | English Base | 50 | Base EN vocabulary; default `cat`/`lang` = `words`/`en` |
-| `nepali.json` | `ne` | Nepali Base (Romanized) | 30 | `cat: NE`, `lang: ne`; extra `tr` romanization hints ignored by loader |
+| `nepali.json` | `ne` | Nepali Base (Romanized) | 30 | `cat: NE`, `lang: ne`; `tr` romanization is first-class (loader prefers `encode(tr)`, plan/03) |
 | `numbers.json` | `numbers` | Numbers | 10 | Digits `0-9`; digit-commit mode, no prediction |
 | `code_js.json` | `js` | JavaScript Keywords | 30 | Keyword prefixes, e.g. `fun` |
 | `code_rust.json` | `rust` | Rust Keywords | 32 | |
@@ -39,7 +39,7 @@ pack (`--f0/--alpha/--fmin`); existing freqs untouched. Canonical IDs gain
 | File | Pack `id` | Words | `freq` range | Notes |
 |---|---|---|---|---|
 | `words_en.json` | `words` | 5150 | 120..1000000 | EN core + common/tech + web2 tail |
-| `nepali.json` | `ne` | 253 | 200..9000 | +223 romanized→Devanagari (`w`+`tr`), `cat: NE` kept |
+| `nepali.json` | `ne` | 8000 (v2.0.0) | 200..9000 | pipeline `w+tr` (HF 2.4M + wiki freq + 253 curated head); see Nepali rebuild below |
 | `numbers.json` | `numbers` | 10 | 50000 | unchanged (builtin digit-commit) |
 | `code_js.json` | `js` | 183 | 500..9500 | +153 keywords, DOM/Node/builtins |
 | `code_rust.json` | `rust` | 150 | 500..9500 | +118 keywords, std types/macros/attrs |
@@ -50,6 +50,44 @@ pack (`--f0/--alpha/--fmin`); existing freqs untouched. Canonical IDs gain
 
 Total: **6613 words, ~385 KiB** (was 225). Lean by design: Zipf freqs,
 single tokens, no bloat.
+
+## Nepali rebuild (plan/03, v2.0.0, 8000 words)
+
+`scripts/build_ne_pack.py` replaces the 253-word toy with a downloaded
+`w+tr` pack (never hand-made):
+
+- Pairs: HF `Saugatkafley/Nepali-Roman-Transliteration` train parquet
+  (MIT, 2,397,414 rows → 2,392,263 unique natives, zero drops: all
+  single-token Devanagari + Roman). Top roman per word = `tr`, next two
+  distinct romans = `alt` (304 rows carry variants).
+- Freq: Leipzig `nep_news_2019` specified but UNAVAILABLE to automation
+  (wortschatz.uni-leipzig.de Anubis bot-wall, no working direct tarball
+  URL, no desktop browser) — substituted with Nepali-Wikipedia
+  pages-articles token counts (488,569 unique tokens / 11.2M occurrences;
+  log-scaled to `freq`, floor 200). The `w+tr` pairs are unaffected.
+- Head: the 253 curated headwords pin the ranking with their freqs
+  (curated `tr` wins conflicts; HF top roman becomes `alt`).
+- Result: 253 curated + 7747 tail = **8000 rows**, `freq` 200..9000,
+  every row has `tr`, zero all-`9` (matra-only) seqs in the index.
+  Source CSV regenerated at `packs/sources/nepali.csv` (pipeline-owned;
+  `seed_expansion.py` skips Nepali since).
+
+Gate (`core-rust/tests/gate.rs`, frozen seed, Roman `encode(tr)` digits):
+
+| Corpus | NE top-3@4 ON | NE top-3@4 OFF | Scope top-3@4 ON | KSPW | Verdict |
+|---|---|---|---|---|---|
+| 253-word toy, Devanagari digits (old harness) | 0.75 | — | — | — | below bar, untypeable seqs |
+| 253-word toy, Roman `tr` digits | 0.94 | 0.98 | 0.92 | 0.686 | PASS (headwords work) |
+| 8000-word v2.0.0, Roman `tr` digits | 0.26 | 0.39 | 0.34 | 0.852 | **NO-GO on scope** |
+
+Diagnosis: 4-prefix buckets average **5.12** words (max 109) vs EN
+2.42 (max 13) — within-tab crowding, not cross-tab pollution (NE-only
+stack: 0.218 ON / 0.356 OFF unweighted). Neighbor-ON scores *below*
+neighbor-OFF at this density (extra 1-edit candidates outrank the tail).
+Cheapest-first per `plan/00-gates.md`: neighbor retune (alt 1), category
+boost 0.3→0.6 / hard tab filter (alt 2), per-category 16-key last
+(alt 5). Engine behavior unchanged by this task — numbers reported,
+alternatives left to the gate owner.
 
 ## Sequence examples
 
