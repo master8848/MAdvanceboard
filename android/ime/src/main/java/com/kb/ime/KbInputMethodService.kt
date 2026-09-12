@@ -51,7 +51,8 @@ class KbInputMethodService : InputMethodService() {
     private var isEmailOrUri: Boolean = false
     private var predictionEnabled: Boolean = true
     private var inputMode: InputMode = InputMode.TEXT
-    private var qwertyFallback: Boolean = false
+    /** QWERTY fallback flag; observable so the FAB label recomposes on toggle. */
+    private var qwertyFallback by mutableStateOf(false)
     /**
      * Active pad layout id (`t9-9` / `t9-12` / `t9-16`). Encoder flag only —
      * plumbed to [suggestWithLayout]/[learnWithLayout]; persisted by
@@ -217,6 +218,7 @@ class KbInputMethodService : InputMethodService() {
                         onSym = { showGenericSymbolsSheet() }
                     ),
                     statusLine = gestureError,
+                    onError = { gestureError = it },
                     qwertyActive = qwertyFallback
                 )
             }

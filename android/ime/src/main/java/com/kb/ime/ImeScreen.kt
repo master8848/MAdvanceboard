@@ -72,7 +72,9 @@ fun ImeScreen(
     fallbackActions: FallbackActions = FallbackActions(),
     qwertyActive: Boolean = false,
     /** Explicit error/status line (gesture failures surface here, never silent). */
-    statusLine: String? = null
+    statusLine: String? = null,
+    /** Sink for overlay prefs failures (coach/footer), shown via [statusLine]. */
+    onError: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(1) }
@@ -162,8 +164,12 @@ fun ImeScreen(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
                 )
                 TextButton(onClick = {
-                    GestureTuningStore.dismissFooterHint(context)
-                    footerVisible = false
+                    try {
+                        GestureTuningStore.dismissFooterHint(context)
+                        footerVisible = false
+                    } catch (e: Exception) {
+                        onError("Could not dismiss hint: ${e.message}")
+                    }
                 }) { Text("hide") }
             }
         }
@@ -188,12 +194,20 @@ fun ImeScreen(
         if (coachVisible) {
             GestureCoach(
                 onSkip = {
-                    GestureTuningStore.markCoachSeen(context)
-                    coachVisible = false
+                    try {
+                        GestureTuningStore.markCoachSeen(context)
+                        coachVisible = false
+                    } catch (e: Exception) {
+                        onError("Could not save coach state: ${e.message}")
+                    }
                 },
                 onDone = {
-                    GestureTuningStore.markCoachSeen(context)
-                    coachVisible = false
+                    try {
+                        GestureTuningStore.markCoachSeen(context)
+                        coachVisible = false
+                    } catch (e: Exception) {
+                        onError("Could not save coach state: ${e.message}")
+                    }
                 }
             )
         }
