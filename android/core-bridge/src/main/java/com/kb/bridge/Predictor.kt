@@ -73,6 +73,12 @@ data class ScoredCandidate(
  *   `rejectWithShown(word, shown)` — reject penalty + rejected session event
  *   (delegate to core-internal `record_reject`; the UniFFI export IS present,
  *   `predictor.rs:314,320`).
+ * - `setCatEnabled(cat, enabled)` / `isCatEnabled(cat)` — runtime category
+ *   enable toggle (plan/08 reorder UI calls these live; verified with the
+ *   read-back).
+ * - `placement(word)` — per-word provenance (`pack cat • freq • accepts`);
+ *   `""` means no pack holds the word (explicit no-record, never a
+ *   fabricated pack).
  * - `exportSession()` — session log as JSONL.
  * - Layout passthroughs (`encode` / `decode` / `layouts` / cat-map) and
  *   persist passthroughs (`open_persist` / `flush_persist` / `compact_persist`).
@@ -97,6 +103,9 @@ interface Predictor : AutoCloseable {
     suspend fun forget(word: String)
     suspend fun reject(word: String)
     suspend fun rejectWithShown(word: String, shown: List<String>)
+    suspend fun setCatEnabled(cat: String, enabled: Boolean)
+    suspend fun isCatEnabled(cat: String): Boolean
+    suspend fun placement(word: String): String
     suspend fun exportSession(): String
     suspend fun encode(word: String, layoutId: String): String
     suspend fun decode(prefix: String, layoutId: String, limit: Int): List<String>
@@ -175,6 +184,15 @@ class UniFfiPredictor internal constructor(
 
     override suspend fun rejectWithShown(word: String, shown: List<String>): Unit =
         withContext(Dispatchers.Default) { real.rejectWithShown(word, shown) }
+
+    override suspend fun setCatEnabled(cat: String, enabled: Boolean): Unit =
+        withContext(Dispatchers.Default) { real.setCatEnabled(cat, enabled) }
+
+    override suspend fun isCatEnabled(cat: String): Boolean =
+        withContext(Dispatchers.Default) { real.isCatEnabled(cat) }
+
+    override suspend fun placement(word: String): String =
+        withContext(Dispatchers.Default) { real.placement(word) }
 
     override suspend fun exportSession(): String =
         withContext(Dispatchers.Default) { real.exportSession() }
@@ -354,6 +372,15 @@ class StubPredictor : Predictor {
 
     override suspend fun rejectWithShown(word: String, shown: List<String>): Unit =
         reject(word)
+
+    override suspend fun setCatEnabled(cat: String, enabled: Boolean): Unit =
+        degraded("setCatEnabled has no in-memory equivalent")
+
+    override suspend fun isCatEnabled(cat: String): Boolean =
+        degraded("isCatEnabled has no in-memory equivalent")
+
+    override suspend fun placement(word: String): String =
+        degraded("placement has no in-memory equivalent")
 
     override suspend fun exportSession(): String =
         withContext(Dispatchers.Default) {

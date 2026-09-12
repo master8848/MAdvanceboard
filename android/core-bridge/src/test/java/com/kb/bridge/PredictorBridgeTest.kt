@@ -77,6 +77,9 @@ class PredictorBridgeTest {
             { stub.decode("435", "t9-9", 5) },
             { stub.setDefaultLayout("t9-9") },
             { stub.addPackJson("{}", 10) },
+            { stub.setCatEnabled("words", true) },
+            { stub.isCatEnabled("words"); Unit },
+            { stub.placement("hello"); Unit },
         )) {
             try {
                 op()
