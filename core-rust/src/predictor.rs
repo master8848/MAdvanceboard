@@ -70,6 +70,9 @@ impl Predictor {
     /// Suggest up to `limit` candidates for `digits` with context `ctx`.
     /// `active_tab` selects the category boost (e.g. `"EN"`, `"js"`).
     /// Back-compat path: always the `t9-9` default layout.
+    /// Types through the production per-tab policy
+    /// ([`SuggestOpts::policy_for_tab`](crate::stack::SuggestOpts::policy_for_tab)):
+    /// neighbor matching OFF, code tabs hard-scoped to the active tab.
     pub fn suggest(
         &self,
         ctx: String,
@@ -104,7 +107,7 @@ impl Predictor {
                 let mapping = mapping.clone();
                 i.note_layout_error(err);
                 i.stack
-                    .suggest_for_layout_at(&ctx, &digits, &mapping, tab, limit as usize, now)
+                    .suggest_for_layout_policy_at(&ctx, &digits, &mapping, tab, limit as usize, now)
             })
             .unwrap_or_else(|e| panic!("Predictor::suggest_with_layout: lock poisoned: {e}"))
     }
@@ -112,7 +115,8 @@ impl Predictor {
     /// Suggest for a category tab, resolving the layout per keystroke:
     /// per-cat override -> global default -> `t9-9` (see
     /// `LayoutRegistry::resolve`). Fallbacks are loud (see
-    /// [`Self::take_last_layout_error`]).
+    /// [`Self::take_last_layout_error`]). Types through the production
+    /// per-tab policy (neighbor OFF, code tabs hard-scoped).
     pub fn suggest_for_cat(
         &self,
         ctx: String,
@@ -129,7 +133,7 @@ impl Predictor {
                 let mapping = mapping.clone();
                 i.note_layout_error(err);
                 i.stack
-                    .suggest_for_layout_at(&ctx, &digits, &mapping, tab, limit as usize, now)
+                    .suggest_for_layout_policy_at(&ctx, &digits, &mapping, tab, limit as usize, now)
             })
             .unwrap_or_else(|e| panic!("Predictor::suggest_for_cat: lock poisoned: {e}"))
     }
@@ -637,6 +641,26 @@ mod tests {
         p.learn("hello".to_string(), "EN".to_string());
         let exported = p.export_session();
         assert!(exported.contains("hello"));
+    }
+
+    #[test]
+    fn suggest_types_through_off_policy() {
+        // Production policy (Tier-0 outcome): exact + prefix match, but a
+        // 1-edit neighbor miss no longer fuzzy-matches by default.
+        let p = Predictor::new(
+            r#"[{"w":"hello","freq":900,"cat":"EN"}]"#.to_string(),
+        );
+        let exact = p.suggest("".to_string(), "43556".to_string(), "EN".to_string(), 5);
+        assert_eq!(exact[0].word, "hello");
+        // "43555" differs from hello's 43556 in the last digit (6 vs 5,
+        // adjacent keys): the frozen ON arm finds it, the shipped policy
+        // must not.
+        let fuzzy = p.suggest("".to_string(), "43555".to_string(), "EN".to_string(), 5);
+        assert!(
+            fuzzy.iter().all(|s| s.word != "hello"),
+            "policy defaults neighbor OFF, got {:?}",
+            fuzzy.iter().map(|s| &s.word).collect::<Vec<_>>()
+        );
     }
 
     #[test]
