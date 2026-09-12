@@ -277,11 +277,6 @@ impl LayoutSpec {
         }
     }
 
-    /// Buffer-reusing encode used by precompute paths.
-    pub fn encode_word_reused(&self, word: &str, buf: &mut String) -> String {
-        self.encode_word_into(word, buf);
-        buf.clone()
-    }
 }
 
 impl KeyMapping for LayoutSpec {
