@@ -41,6 +41,27 @@ LAYOUTS_DIR = ROOT / "layouts"
 # Canonical pack ids (packs/README.md ID map). `medical` is the new addition.
 CANONICAL_IDS = {"words", "ne", "js", "rust", "html", "emoji", "numbers", "math", "medical"}
 
+# Minimum production sizes per pack id. `validate` fails loudly below
+# these and names the exact missing source file — a pack that cannot be
+# completed from available sources must never ship near-empty silently.
+MIN_WORDS = {
+    "words": 5000, "ne": 5000,
+    "js": 200, "rust": 200, "html": 200,
+    "emoji": 150, "math": 100,
+    "medical": 500, "numbers": 10,
+}
+MIN_SOURCE = {
+    "words": "packs/sources/words_en.txt",
+    "ne": "packs/sources/nepali.csv (pipeline-owned: scripts/build_ne_pack.py)",
+    "js": "packs/sources/code_js.txt",
+    "rust": "packs/sources/code_rust.txt",
+    "html": "packs/sources/code_html.txt",
+    "emoji": "packs/sources/emoji.csv",
+    "math": "packs/sources/math.csv",
+    "medical": "packs/sources/medical.txt",
+    "numbers": "builtin digits (no source file)",
+}
+
 # --- T9 encoder (loaded from layouts/*.json, single source of truth) --------
 
 DEFAULT_LAYOUT = "t9-9"
@@ -207,6 +228,13 @@ def validate_pack(pack: dict, path_name="pack") -> list:
         return errs
     if pack["id"] not in CANONICAL_IDS:
         errs.append(f"{path_name}: non-canonical id '{pack['id']}'")
+    want = MIN_WORDS.get(pack["id"])
+    have = len(pack["words"])
+    if want is not None and have < want:
+        errs.append(
+            f"{path_name}: pack '{pack['id']}' has {have} words "
+            f"(< production minimum {want}): missing source "
+            f"{MIN_SOURCE.get(pack['id'], '?')} — refusing near-empty pack")
     seen = set()
     for i, e in enumerate(pack["words"]):
         loc = f"{path_name} word[{i}]"
