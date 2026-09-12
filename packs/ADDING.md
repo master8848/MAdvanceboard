@@ -74,6 +74,19 @@ script header) + the 253 curated headwords pinned from the previous
 against it (it would rewrite `packs/sources/nepali.csv` back to the
 223-word curated list); the script now skips Nepali itself.
 
+## SDK docs (ship without reading source)
+
+- Vocab packs (data-only, the default): `docs/VOCAB_SDK.md` — manifest
+  fields, row format, tokenizer modes, worked 10-word example, install +
+  SHA-256, priority, `privacy.learn`, failure modes F1–F7.
+- Code plugins (privileged): `docs/PLUGIN_SDK.md` — `candidates()`
+  contract, registry/manifest, sandbox rules, worked example, capability
+  matrix + separation rationale.
+- SPEC `.kbpack` envelope: `docs/EXTENSIONS.md` (target format) +
+  `kbpack.schema.json`. Wrap an MVP pack JSON into `kbpack.json` +
+  `dict.jsonl.gz` + zip exactly as `docs/VOCAB_SDK.md` §4 step 4 shows;
+  core loads `packs/*.json` only (no zip loader yet — VOCAB_SDK F7).
+
 ## Memory / leanness rules
 
 - `freq` stays in `1..1e6` (Zipf, enforced by validation).
