@@ -127,7 +127,7 @@ class KbInputMethodService : InputMethodService() {
                     },
                     onCategoryChanged = { onCategoryChanged(it) },
                     activeLayoutId = liveLayoutId,
-                    onLayoutChanged = { setPadLayout(PadModeStore.save(this, it)) }
+                    onLayoutChanged = { setPadLayout(PadModeStore.save(this@KbInputMethodService, it)) }
                 )
             }
         }
