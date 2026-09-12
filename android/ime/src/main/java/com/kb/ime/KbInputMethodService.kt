@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.ComposeView
+import androidx.lifecycle.Lifecycle
 import com.kb.bridge.KbCore
 import com.kb.bridge.Predictor
 import com.kb.bridge.PredictorFactory
@@ -131,6 +132,20 @@ class KbInputMethodService : InputMethodService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /**
+     * Lifecycle owner for the [ComposeView] strip. `InputMethodService`
+     * windows provide no view-tree owners; without them the strip crashes
+     * on attach (`ViewTreeLifecycleOwner not found`, then
+     * `ViewTreeSavedStateRegistryOwner` — both caught on the first
+     * on-device smoke; the keyboard could never open). Implemented in
+     * [ImeLifecycle] (Java — see its KDoc for why), which supplies all
+     * three owners Compose requires (lifecycle + saved-state registry +
+     * view-model store). Driven by the service lifecycle: CREATED in
+     * [onCreate], RESUMED in [onStartInputView], PAUSED in
+     * [onFinishInputView], DESTROYED in [onDestroy].
+     */
+    private val imeLifecycleOwner = ImeLifecycle()
+
+    /**
      * Injected predictor. Framework-instantiated services can't take
      * constructor params, so this is field-injected: [initEngine] assigns
      * the [PredictorFactory] decision ([UniFfiPredictor] default,
@@ -154,6 +169,7 @@ class KbInputMethodService : InputMethodService() {
 
     override fun onCreate() {
         super.onCreate()
+        imeLifecycleOwner.handle(Lifecycle.Event.ON_CREATE)
         gestureLog = GestureLog(this, onError = { gestureError = it })
         // Restore the user's persisted layout (per-tab resolve; the
         // default tab is `words`) before first inflate.
@@ -335,6 +351,9 @@ class KbInputMethodService : InputMethodService() {
         pad.tag = "pad"
         root.addView(strip)
         root.addView(pad)
+        // The service window owns no lifecycle: attach ours before the
+        // window attaches (ComposeView resolves it in onAttachedToWindow).
+        ImeLifecycle.attachTo(root, imeLifecycleOwner)
         cachedInputView = root
         return root
     }
@@ -353,6 +372,7 @@ class KbInputMethodService : InputMethodService() {
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        imeLifecycleOwner.handle(Lifecycle.Event.ON_RESUME)
         // Layout already reflects inputMode via predictionEnabled (raw commit when
         // false). Pad swaps only happen on explicit QWERTY toggle to avoid desync.
         // Re-read Tuning + AT state so Settings changes apply without IME restart.
@@ -383,6 +403,7 @@ class KbInputMethodService : InputMethodService() {
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
+        imeLifecycleOwner.handle(Lifecycle.Event.ON_PAUSE)
         try {
             currentInputConnection?.finishComposingText()
         } catch (_: Exception) {
@@ -407,6 +428,7 @@ class KbInputMethodService : InputMethodService() {
 
     override fun onDestroy() {
         serviceScope.cancel()
+        imeLifecycleOwner.handle(Lifecycle.Event.ON_DESTROY)
         try {
             predictor?.close()
         } catch (_: Exception) {
@@ -461,6 +483,10 @@ class KbInputMethodService : InputMethodService() {
      *   reuse is logged once per session batch, not silently assumed).
      */
     internal fun onPadCode(code: String) {
+        android.util.Log.d(
+            "KbIME",
+            "onPadCode code=$code tab=$activeAssetId layout=$activeLayoutId seq=$seq"
+        )
         val key = activeSpec?.keyByCode(code)
         val symbols = key?.symbols.orEmpty()
         if (symbols.isNotEmpty() && symbols.none { it.isLetter() }) {
@@ -638,6 +664,11 @@ class KbInputMethodService : InputMethodService() {
                 reportGestureError("Suggest failed: ${e.message}")
                 emptyList()
             }
+            android.util.Log.d(
+                "KbIME",
+                "suggest seq=$snapshot tab=$tab layout=$layoutId -> ${result.size} " +
+                    "top=${result.firstOrNull()?.word}"
+            )
             lastShown = result.map { it.word }
             liveCandidates = result.map { it.word }
         }
