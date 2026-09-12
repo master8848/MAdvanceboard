@@ -1,0 +1,29 @@
+# mise toolchain for the keyboard-project monorepo.
+# After cloning: `just bootstrap` (mise trust + mise install).
+# Versions pinned; see notes per tool below.
+
+[tools]
+# core-rust edition 2021; UniFFI 0.32.1 is pulled via Cargo (core-rust/Cargo.toml),
+# so the toolchain itself just tracks stable.
+rust = "stable"
+# AGP/Gradle toolchain requires JDK 17.
+java = "17"
+# Matches android/gradle/wrapper/gradle-wrapper.properties; ./gradlew is the fallback.
+gradle = "9.6.0"
+just = "latest"
+# scripts/build_pack.py + JSON validation of packs/*.json.
+python = "3.12"
+# Repo prefers bun per env; no JS in repo yet — convenience only.
+bun = "latest"
+
+[env]
+# JAVA_HOME is exported automatically by mise's java backend on `mise install`.
+# Intentionally no manual override here so Gradle daemons pick up the mise-managed JDK.
+
+[tasks.test-core]
+description = "Shortcut for `just test-core`"
+run = "just test-core"
+
+[tasks.validate-packs]
+description = "Shortcut for `just validate-packs`"
+run = "just validate-packs"
