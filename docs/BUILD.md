@@ -13,9 +13,9 @@
 | `just` | latest | `mise.toml`; recipes in `justfile` (`just --list`) |
 | `bun` | latest | convenience only — no JS in repo yet |
 
-Android stack (verified statically in `android/QA_REPORT.md` §1): AGP 9.4.0,
-Kotlin 2.2.20 (KSP 2.2.20-2.0.2), compileSdk/targetSdk 36, minSdk 26, Compose
-BOM 2026.09.00, Java 17 in all 5 modules.
+Android stack (build-green per `android/BUILD_STATUS.md` run 11): AGP 9.4.0,
+Kotlin 2.3.20 (KSP 2.3.12), compileSdk/targetSdk 36, minSdk 26, Compose
+BOM 2026.06.01, Java 17 in all 5 modules.
 
 ## 2. Just recipes
 
@@ -63,7 +63,7 @@ Covers mapping (`hello`→`43556`, Devanagari collapse, 1-edit neighbors),
 ranking (exact > neighbor, personal boost, reject penalty, recency, freq
 ordering), stack (exact/fuzzy/category-boost/priority/personal
 promote+block/FST prefix), personal (learn, password-mode bypass, tombstones,
-LFU cap, redb + JSONL roundtrips), session (export/import, garbage
+LFU cap, rusqlite + JSONL roundtrips), session (export/import, garbage
 rejection), pack loader (encode, `seq` override, invalid reject), predictor
 roundtrip — 33 passed, 0 failed (`INTEGRATION_REPORT.md` §1). Suggest-path
 spot check from the lean pass: ~19µs avg (debug, all 8 packs, 2000×
@@ -87,12 +87,12 @@ fields), **not** the dev-time `packs/*.json` wordlists
 
 ## 6. Troubleshooting
 
-- **No-JDK env (this sandbox).** `android-assemble` fails without JDK 17 —
-  expected. Verify `JAVA_HOME` is set (`mise install`, re-exec shell with mise
-  activated); until then use `just test-core` + `just validate-packs` +
-  static `grep` checks (`grep -rn INTERNET android/ime/ android/app/src` →
-  no hits for BIND-only). All Android reports to date are static-only for this
-  reason (`android/QA_REPORT.md` header; `android/FIX_REPORT.md` §Known remaining).
+- **No-JDK env.** `android-assemble` fails without JDK 17 — expected.
+  Verify `JAVA_HOME` is set (`mise install`, re-exec shell with mise
+  activated; `mise.toml` pins java 17.0.2). With the toolchain installed,
+  `assembleDebug` is green (`android/BUILD_STATUS.md` run 11); older
+  Android reports remain static-only given their env
+  (`android/QA_REPORT.md` header; `android/FIX_REPORT.md` §Known remaining).
 - **`uniffi-bindgen 0.32` regen (LANDED).** Bindgen version must match the
   crate (`uniffi 0.32.1` in `core-rust/Cargo.toml` + `Cargo.lock`).
   Regen ran with `uniffi-bindgen 0.32.1`

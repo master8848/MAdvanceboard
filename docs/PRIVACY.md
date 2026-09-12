@@ -35,8 +35,9 @@ is an explicit user action that bumps `ts`.
 
 ## Incognito / what stays local
 
-- Learning lives in on-device storage (`redb` via `core-rust`, WAL +
-  hourly compact). It never leaves the device unless you export.
+- Learning lives in on-device storage (SQLite via `core-rust`
+  `rusqlite` bundled, WAL + hourly compact). It never leaves the device
+  unless you export.
 - Session logs (`log.jsonl`: accepted/rejected events) are local replay
   material for import; export includes them only in the session file you
   explicitly save.

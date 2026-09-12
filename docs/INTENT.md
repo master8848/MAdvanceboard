@@ -1,10 +1,10 @@
-# Research Intent — 9-Key Predictive Keyboard (`kb9`)
+# Research Intent — Configurable Predictive Keyboard (`kb9`, 9-key default)
 
 > Research-app framing. Normative spec remains `SPEC.md`; behavior guides are `docs/USER.md`, `docs/PRIVACY.md`, `docs/EXTENSIONS.md`, `docs/SYNC.md`, `docs/TUNING.md`.
 
 ## 1. Problem statement
 
-Full QWERTY is slow and error-prone on small, distant, or attention-constrained surfaces (phone one-hand, TV remote, VR/AR, watch), and monolingual autocomplete fails users who mix natural languages (EN/NE), code (`js`/`rust`/`html`), emoji, numbers, and math/LaTeX in one session. The research bet: a 9-key pad (3×3) plus a shared prediction engine can beat QWERTY on keystrokes-per-word without adding layout complexity, if ranking, categories, and personal learning do the heavy lifting.
+Full QWERTY is slow and error-prone on small, distant, or attention-constrained surfaces (phone one-hand, TV remote, VR/AR, watch), and monolingual autocomplete fails users who mix natural languages (EN/NE), code (`js`/`rust`/`html`), emoji, numbers, and math/LaTeX in one session. The research bet: a 9-key pad (3×3) as default plus a shared prediction engine can beat QWERTY on keystrokes-per-word without adding layout complexity, if ranking, categories, and personal learning do the heavy lifting. The shipped board is config-dependent (9/12 simple, 16 Nepali/complex, QWERTY fallback per category); symbol / second-symbol / numbers paths are optimized as category tabs + action gestures, not QWERTY mode-switch stacks.
 
 Grounded in repo:
 
@@ -35,7 +35,7 @@ Grounded in repo:
 
 - **Not a commercial lock-in keyboard.** No exclusive store, no gated loader, no server account (`SPEC.md` §§3,5; `docs/EXTENSIONS.md` §5; `docs/PRIVACY.md`; `docs/SYNC.md` §1).
 - **Not a cloud-AI keyboard.** Bigrams are personal-only with backoff 0, no server model (`SPEC.md` §2; `docs/PRIVACY.md` incognito section).
-- **Not gesture/voice typing.** Explicit MVP non-goals: cloud account sync, gesture typing, voice (`SPEC.md` §7).
+- **Not gesture/voice typing.** Explicit MVP non-goals: cloud account sync, gesture typing (`SPEC.md` §7). Voice is a Tier-3 extension (`plan/15-voice-typing.md`), not MVP.
 - **Not a password learner.** Password fields and `privacy.learn: false` packs (`numbers`, `math`) never touch personal/bigram/log (`docs/PRIVACY.md`; `android/README.md` privacy notes; `docs/USER.md` §5).
 
 ## 5. Research questions + falsifiable success criteria
@@ -61,10 +61,10 @@ Falsification: if KSPW >2.0, neighbor-on shows no mis-press gain, or 7-day learn
 - **Sync conflicts / neologism evolution.** Risk: new words lost or duplicated across devices. Mitigation: per-word-id last-write-wins + element-wise max-merge of monotonic counters, tombstone-wins-on-newest, HLC `ts` + `deviceId`, pack updates never overwrite `personal.jsonl`, session log replay rebuilds counters deterministically (`SPEC.md` §5; `docs/SYNC.md` §§2–4).
 - **Layout-shift discouragement.** Risk: churning suggestions teach distrust. Mitigation: stable ranking weights, tie-break (shorter → lexicographic → priority), hide threshold `−0.5`, expand-all pages instead of reordering the bar, user-reorderable tabs, per-user tuning sliders with reset (`SPEC.md` §§0,2; `docs/TUNING.md` §§2–4; `docs/USER.md` §§2–3).
 - **Spelling atrophy / over-reliance.** Risk: users accept wrong words. Mitigation: placement popup (`packId • freq • accepts`) answers "why suggested", Pin/Block/Info actions, reject penalty (−1.5 weight), block tombstones exempt from eviction and replicated, QWERTY path keeps full spelling visible (`SPEC.md` §§2,4; `docs/USER.md` §§6–7; `docs/TUNING.md` §1).
-- **Privacy.** Risk: keystroke leakage. Mitigation: `BIND_INPUT_METHOD`-only, no `INTERNET` in shell, opt-in file sync only, no password learning, on-device `redb` + WAL, nothing transmitted (`docs/PRIVACY.md`; `android/README.md`).
+- **Privacy.** Risk: keystroke leakage. Mitigation: `BIND_INPUT_METHOD`-only, no `INTERNET` in shell, opt-in file sync only, no password learning, on-device SQLite (`rusqlite` bundled) + WAL, nothing transmitted (`docs/PRIVACY.md`; `android/README.md`).
 
 ## 7. Scope: MVP vs v2
 
 **MVP (SPEC M0–M4, `SPEC.md` §7):** monorepo + Rust `trie`/encoder/CLI; Android IME shell (9/12-key, bar + expand-all, QWERTY toggle, EN/numbers tabs); ranking + bigram + personal + reject logging + placement popup; `.kbpack` loader + 8 showcase packs (`en`, `ne`, `numbers`, `js`, `rust`, `html`, `emoji`, `math` per `packs/README.md`); JSONL session export/import + file-sync + auto-recovery + tuning settings + privacy doc + Play-internal release. Current state: 33 unit tests green, 8/8 packs load (225 words), stub `Predictor` + missing snapshot/WAL/merge/recovery still owed (`INTEGRATION_REPORT.md` §§1–4).
 
-**V2 (deferred):** background sync service beyond the 24 h `WorkManager` file-sync stub (Drive/WebDAV folder polling, conflict UI), cloud account sync explicitly out of MVP (`SPEC.md` §7; `android/README.md` sync stub); medical/domain pack showcase; longitudinal KSPW/learning-lift study using exported session logs (`docs/SYNC.md` §2); gesture/voice remain non-goals until H1–H3 are confirmed.
+**V2 (deferred):** background sync service beyond the 24 h `WorkManager` file-sync stub (Drive/WebDAV folder polling, conflict UI), cloud account sync explicitly out of MVP (`SPEC.md` §7; `android/README.md` sync stub); medical/domain pack showcase; longitudinal KSPW/learning-lift study using exported session logs (`docs/SYNC.md` §2); voice extension per `plan/15-voice-typing.md`; gesture-typing remains non-goal until H1–H3 are confirmed.

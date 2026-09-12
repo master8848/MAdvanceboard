@@ -52,7 +52,8 @@ on/off. Reset-to-defaults button restores the table above.
 - `freq_personal *= 0.98` monthly if unused — demotes, never deletes.
 - Reject ratio decays over 30 d.
 - Cap: 20 k entries, LRU-evicted (SPEC); `core-rust` personal overlay uses
-  LFU 10 k via `redb` — treat SPEC as target, code as current.
+  LFU 10 k via bundled SQLite (`rusqlite`) — decided in code
+  (`core-rust/src/personal.rs`), SPEC stays the aspirational target.
 - Blocked tombstones are exempt from eviction and decay.
 
 Related: `USER.md` (suggestion bar, block), `SYNC.md` (counters merge by
