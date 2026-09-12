@@ -268,29 +268,34 @@ impl Predictor {
     }
 
     /// Learn a word into the personal overlay (no-op in password mode)
-    /// and log an accepted session event. The shown-candidates seq and
-    /// the session-log seq encode under the category's resolved layout
-    /// (per-cat override -> global default -> `t9-9`).
+    /// and log an accepted session event. The session-log seq encodes
+    /// under the category's resolved layout (per-cat override -> global
+    /// default -> `t9-9`). The `shown` list is empty here — callers that
+    /// hold the last suggest result must use [`Self::learn_with_shown`]
+    /// instead so `learn` stays an O(1) HashMap op and never runs a full
+    /// `suggest` inside the lock (plan/05 #5: the old path doubled
+    /// keystroke latency and held the `Mutex` across scoring).
     /// Durability is coalesced: the mutation dirties RAM only; when the
     /// 2 s window has elapsed the flush runs inline (failures recorded to
     /// `take_last_persist_error`, never fatal to the keystroke).
     pub fn learn(&self, word: String, category: String) {
+        self.learn_with_shown(word, category, Vec::new());
+    }
+
+    /// Learn with the caller-observed `shown` candidates (the words from
+    /// the last `suggest` call that produced this commit). O(1) personal
+    /// HashMap op + session log + coalesced flush — no suggest-in-`Mutex`.
+    pub fn learn_with_shown(&self, word: String, category: String, shown: Vec<String>) {
         self.inner.lock().map(|mut i| {
             let cat = if category.is_empty() { "EN" } else { &category };
             let (mapping, err) = i.layouts.resolve_report(cat);
             let mapping = mapping.clone();
             i.note_layout_error(err);
             let seq = mapping.encode_word(&word);
-            let shown: Vec<String> = i
-                .stack
-                .suggest_for_layout("", &seq, &mapping, cat, 3)
-                .into_iter()
-                .map(|s| s.word)
-                .collect();
             i.stack.personal.learn(&word, cat);
             i.session.log_accepted(&seq, "", &word, &shown);
             Self::flush_if_due_inner(&mut i);
-        }).unwrap_or_else(|e| panic!("Predictor::learn: lock poisoned: {e}"));
+        }).unwrap_or_else(|e| panic!("Predictor::learn_with_shown: lock poisoned: {e}"));
     }
 
     /// Block a word (personal tombstone).
@@ -302,23 +307,26 @@ impl Predictor {
     }
 
     /// Record a rejection (reject penalty + rejected session event).
-    /// Session-log seq encodes under the `EN` resolved layout.
+    /// Session-log seq encodes under the `EN` resolved layout. The `shown`
+    /// list is empty here — callers holding the last suggest result must
+    /// use [`Self::reject_with_shown`]; `reject` stays an O(1) HashMap op
+    /// and never runs a full `suggest` inside the lock (plan/05 #5).
     pub fn reject(&self, word: String) {
+        self.reject_with_shown(word, Vec::new());
+    }
+
+    /// Reject with the caller-observed `shown` candidates. O(1) personal
+    /// HashMap op + session log + coalesced flush — no suggest-in-`Mutex`.
+    pub fn reject_with_shown(&self, word: String, shown: Vec<String>) {
         self.inner.lock().map(|mut i| {
             let (mapping, err) = i.layouts.resolve_report("EN");
             let mapping = mapping.clone();
             i.note_layout_error(err);
             let seq = mapping.encode_word(&word);
-            let shown: Vec<String> = i
-                .stack
-                .suggest_for_layout("", &seq, &mapping, "EN", 3)
-                .into_iter()
-                .map(|s| s.word)
-                .collect();
             i.stack.personal.record_reject(&word);
             i.session.log_rejected(&seq, "", &word, &shown);
             Self::flush_if_due_inner(&mut i);
-        }).unwrap_or_else(|e| panic!("Predictor::reject: lock poisoned: {e}"));
+        }).unwrap_or_else(|e| panic!("Predictor::reject_with_shown: lock poisoned: {e}"));
     }
 
     /// Export the session log as JSONL.
@@ -626,6 +634,31 @@ mod tests {
         p.learn("hello".to_string(), "EN".to_string());
         let exported = p.export_session();
         assert!(exported.contains("hello"));
+    }
+
+    #[test]
+    fn learn_reject_with_shown_log_caller_candidates_without_suggest() {
+        // Plan/05 #5: learn/reject take `shown` from the caller instead of
+        // running a full suggest inside the lock. The session log must
+        // carry exactly what the caller passed.
+        let p = Predictor::new(
+            r#"[{"w":"hello","freq":900,"cat":"EN"}]"#.to_string(),
+        );
+        let shown: Vec<String> = p
+            .suggest("".to_string(), "43556".to_string(), "EN".to_string(), 3)
+            .into_iter()
+            .map(|s| s.word)
+            .collect();
+        assert!(!shown.is_empty());
+        p.learn_with_shown("hello".to_string(), "EN".to_string(), shown.clone());
+        p.reject_with_shown("hell".to_string(), shown.clone());
+        let exported = p.export_session();
+        for w in &shown {
+            assert!(exported.contains(w), "session log must carry shown {w:?}");
+        }
+        // Learning still promotes, rejection still penalizes.
+        let s = p.suggest("".to_string(), "43556".to_string(), "EN".to_string(), 5);
+        assert_eq!(s[0].word, "hello");
     }
 
     #[test]
