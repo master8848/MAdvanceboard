@@ -13,6 +13,16 @@ category boost, key-fit, and reject penalty; the top-3 go to the
 suggestion bar, top-30 to expand-all. QWERTY mode shares the same engine —
 only the key→sequence encoder changes (`SPEC.md` §0).
 
+## What / Why / How
+
+- **What:** MAdvanceboard is an open-source Android keyboard like Gboard:
+  9-key T9 pad + prediction engine + QWERTY fallback.
+- **Why:** research keyboard exploring fast typing on few keys with
+  on-device prediction, fully offline.
+- **How:** Rust core engine (`core-rust/`, crate `kbcore`) + Kotlin IME
+  (`android/`) + vocab packs (`packs/`); build with `just test-core` /
+  `just validate-packs` / `just android-assemble`.
+
 ## Monorepo map
 
 | Path | Contents |
