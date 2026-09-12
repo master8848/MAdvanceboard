@@ -19,6 +19,7 @@ import com.kb.bridge.KbCore
 import com.kb.bridge.Predictor
 import com.kb.bridge.PredictorFactory
 import com.kb.bridge.StubPredictor
+import com.kb.plugin.CategoryLoadOutcome
 import com.kb.plugin.CategoryRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -187,12 +188,20 @@ class KbInputMethodService : InputMethodService() {
                 DEFAULT_LEARN_FLAGS.keys.toList()
             }
             val manifests = try {
-                CategoryRegistry.loadManifests(assets, ids)
+                CategoryRegistry.loadManifestsStrict(assets, ids)
             } catch (_: Exception) {
-                emptyList()
+                CategoryLoadOutcome(emptyList(), emptyList())
             }
-            if (manifests.isNotEmpty()) {
-                learnByCategory = manifests.associate { it.id to it.learn }
+            if (manifests.loaded.isNotEmpty()) {
+                learnByCategory = manifests.loaded.associate { it.id to it.learn }
+            }
+            if (manifests.errors.isNotEmpty()) {
+                // A missing/corrupt tab manifest is user-visible state, never
+                // a silent skip: the status line names the tab + cause.
+                val missing = manifests.errors.joinToString("; ") { "${it.id} (${it.cause})" }
+                val msg = "Category manifests unreadable: $missing"
+                android.util.Log.e("KbIME", msg)
+                gestureError = msg
             }
             @Suppress("unused")
             val nativeAvailable = KbCore.isAvailable()
