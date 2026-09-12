@@ -41,15 +41,50 @@ pack (`--f0/--alpha/--fmin`); existing freqs untouched. Canonical IDs gain
 | `words_en.json` | `words` | 5150 | 120..1000000 | EN core + common/tech + web2 tail |
 | `nepali.json` | `ne` | 8000 (v2.0.0) | 200..9000 | pipeline `w+tr` (HF 2.4M + wiki freq + 253 curated head); see Nepali rebuild below |
 | `numbers.json` | `numbers` | 10 | 50000 | unchanged (builtin digit-commit) |
-| `code_js.json` | `js` | 183 | 500..9500 | +153 keywords, DOM/Node/builtins |
-| `code_rust.json` | `rust` | 150 | 500..9500 | +118 keywords, std types/macros/attrs |
-| `code_html.json` | `html` | 142 | 500..9500 | +109 tags + attributes |
-| `emoji.json` | `emoji` | 111 | 800..9000 | +91, `seq` materialized from `key` |
-| `math.json` | `math` | 69 | 800..6000 | +49, short key-derived `seq` (e.g. `\to→86`) |
-| `medical.json` | `medical` | 545 | 150..6000 | NEW: symptoms, diseases, anatomy, drugs, procedures |
+| `code_js.json` | `js` | 396 | 500..9500 | core keywords + TS + DOM/Node/std methods (v1.2.0) |
+| `code_rust.json` | `rust` | 288 | 500..9500 | keywords + std traits/methods/macros/attrs; 26 `*2`/`*m` placeholders dropped (v1.2.0) |
+| `code_html.json` | `html` | 236 | 500..9500 | tags + attrs + events; 11 `*2` fakes dropped (v1.2.0) |
+| `emoji.json` | `emoji` | 211 | 800..9000 | +100 keyword→emoji; `🧸 bear2→teddy` key fix; `seq` materialized from `key` (v1.2.0) |
+| `math.json` | `math` | 180 | 800..6000 | full command set (Greek, ops, arrows, funcs, accents, fonts); `\sqrt2`/`\cbrt` dropped (v1.2.0) |
+| `medical.json` | `medical` | 545 | 150..6000 | symptoms, diseases, anatomy, drugs, procedures |
 
-Total: **6613 words, ~385 KiB** (was 225). Lean by design: Zipf freqs,
+Total: **15016 words, ~1108 KiB** (was 6613). Lean by design: Zipf freqs,
 single tokens, no bloat.
+
+## Expansion v1.2.0 (2026-09-12, code/math/emoji → full working sets)
+
+`scripts/seed_expansion.py` lists grew from in-repo curation (no downloads;
+all tokens are real keywords/stdlib names/commands — no stubs). Pure
+punctuation clusters (`();`, `=>`, `->`) are NOT in the static vocab:
+they encode to an empty T9 `seq`, so they live in the Tier-1
+symbol/palette layer (`plan/07`), not `suggest()`. `build_pack.py`
+`validate` now enforces production minimums per id (`MIN_WORDS`:
+words/ne 5000, js/rust/html 200, emoji 150, math 100, medical 500,
+numbers 10) and fails loudly naming the missing source file.
+`core-rust/tests/per_tab.rs` reports per-tab top-3@4 through the real
+`DictionaryStack` (run with `-- --nocapture`):
+
+| tab | n@4 | top-3@4 ON | top-3@4 OFF |
+|---|---|---|---|
+| words | 3838 | 0.713 | 0.816 |
+| NE | 7944 | 0.253 | 0.394 |
+| js | 357 | 0.517 | 0.737 |
+| rust | 241 | 0.614 | 0.790 |
+| html | 183 | 0.673 | 0.818 |
+| emoji | 171 | 0.222 | 0.585 |
+| math | 108 | 0.204 | 0.481 |
+| medical | 522 | 0.248 | 0.528 |
+
+(numbers: 10 digits, seq len 1 — digit-commit verified, no prediction.
+Dense-tab crowding matches the `gate.rs` diagnosis: neighbor-ON scores
+below OFF; retune owned by the gate owner. Loader note: the Rust loader
+ignores math `key` and uses `encode(w)` — identical for every row except
+`\parallel` (prefix-reachable via 727), `\sup` (787), `\inf` (463,
+collides `\infty`); all load and rank.)
+Built packs sync to device via `scripts/sync_android_assets.py` →
+`android/ime/src/main/assets/categories/*.json` (manifest fields kept,
+`words` embedded, `version` tracks the pack; new `medical.json`
+extension manifest).
 
 ## Nepali rebuild (plan/03, v2.0.0, 8000 words)
 

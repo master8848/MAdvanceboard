@@ -91,8 +91,9 @@ Enable + set priority. Showcase packs bundled at MVP: `words` (English base,
 file `words_en.json`, 5150 words), `ne` (Nepali base, file `nepali.json`,
 253 words), `medical` (new 2026-09-12, file `medical.json`, 545 terms),
 numbers (builtin, 10), js (183), rust (150), html (142), emoji (111),
-math (69) — 6613 total. Build/expand tooling: `scripts/build_pack.py`,
-how-to: `packs/ADDING.md`.
+math (69) — 6613 total at v1.1.0; v1.2.0 full sets: js 396, rust 288, html 236, emoji 211, math 180 — 15016 total. Build/expand tooling: `scripts/build_pack.py`,
+how-to: `packs/ADDING.md`. Device sync: `scripts/sync_android_assets.py`
+embeds built `words` into `android/.../assets/categories/*.json`.
 
 Canonical IDs (2026-09-12 reconcile): pack/category ids are `words, ne,
 js, rust, html, emoji, numbers, math`, plus **`medical`** (added in the
