@@ -79,6 +79,7 @@ fun SettingsScreen() {
             Text("Open enable-IME wizard")
         }
         LayoutSettingsSection()
+        DictStackSection()
         CustomCategorySection()
         GestureTuningSection()
     }
