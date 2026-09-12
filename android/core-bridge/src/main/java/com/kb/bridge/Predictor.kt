@@ -246,6 +246,14 @@ class UniFfiPredictor internal constructor(
 }
 
 /**
+ * In-memory bound for [StubPredictor] learned words (SPEC §4 §7 personal-cap
+ * shape: 20k entries; the real engine owns the persistent personal dict +
+ * tombstones). The stub evicts oldest-first past this cap — bounded by
+ * construction, never an unbounded leak.
+ */
+const val STUB_LEARN_CAP = 20_000
+
+/**
  * Degraded path ONLY — used when `libkbcore.so` is absent
  * ([KbCore.isAvailable] == false) or engine construction fails. Selection is
  * owned by [PredictorFactory], which always attaches the reason; the IME
@@ -315,9 +323,9 @@ class StubPredictor : Predictor {
     override suspend fun learn(word: String, category: String): Unit =
         withContext(Dispatchers.Default) {
             if (word.isEmpty()) return@withContext
-            // Bound the in-memory stub (20k cap per SPEC §4); the real
-            // engine owns the persistent personal dict + tombstones.
-            if (learned.size >= 20_000) learned.removeAt(0)
+            // Bounded in-memory stub ([STUB_LEARN_CAP], oldest-first evict);
+            // the real engine owns the persistent personal dict + tombstones.
+            if (learned.size >= STUB_LEARN_CAP) learned.removeAt(0)
             learned.removeAll { (w, c) -> w.equals(word, ignoreCase = true) && c == category }
             learned.add(word to category)
             Unit
@@ -370,7 +378,14 @@ class StubPredictor : Predictor {
     override suspend fun layoutDiagnostic(cat: String): String =
         "degraded: no engine layout registry (${KbCore.describeUnavailable()})"
 
-    override suspend fun takeLastLayoutError(): String = ""
+    /**
+     * Explicit degraded signal (NOT `""`): the stub owns no layout registry,
+     * so "no error" would be a lie. Non-empty mirrors the engine's
+     * `""`-means-success convention — callers checking `isNotEmpty()` treat
+     * the stub as errored, which is exactly right.
+     */
+    override suspend fun takeLastLayoutError(): String =
+        "degraded: no engine layout registry (${KbCore.describeUnavailable()})"
 
     override suspend fun addPackJson(packJson: String, priority: Int): String =
         degraded("addPackJson")

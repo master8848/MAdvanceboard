@@ -93,6 +93,24 @@ class PredictorBridgeTest {
     }
 
     @Test
+    fun stubErrorDrainsAreExplicitNeverSilentSuccess() = runBlocking {
+        val stub = StubPredictor()
+        val layoutError = stub.takeLastLayoutError()
+        assertTrue(
+            "stub layout drain must be explicit degraded signal, got: $layoutError",
+            layoutError.contains("libkbcore.so")
+        )
+        assertTrue(
+            "persist drain must be explicit degraded signal",
+            stub.takeLastPersistError().contains("libkbcore.so")
+        )
+        assertTrue(
+            "layout diagnostic must name the cause",
+            stub.layoutDiagnostic("words").contains("libkbcore.so")
+        )
+    }
+
+    @Test
     fun scoredCandidateCarriesFullEngineShape() {
         val c = ScoredCandidate(word = "hello", score = 1.5, seq = "43556", cat = "words", layoutId = "t9-9")
         assertEquals("hello", c.word)
