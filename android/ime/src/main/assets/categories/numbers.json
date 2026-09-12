@@ -1,15 +1,1 @@
-{
-  "id": "numbers",
-  "displayName": "123",
-  "title": "123",
-  "version": "1.0.0",
-  "source": "bundled",
-  "priority": 10,
-  "langs": [
-    "en"
-  ],
-  "description": "Digit commit mode (no prediction)",
-  "privacy": {
-    "learn": false
-  }
-}
+{"id": "numbers", "displayName": "123", "title": "123", "version": "1.0.0", "source": "bundled", "priority": 10, "langs": ["en"], "description": "Digit commit mode (no prediction)", "privacy": {"learn": false}, "words": [{"w": "0", "freq": 50000, "cat": "numbers"}, {"w": "1", "freq": 50000, "cat": "numbers"}, {"w": "2", "freq": 50000, "cat": "numbers"}, {"w": "3", "freq": 50000, "cat": "numbers"}, {"w": "4", "freq": 50000, "cat": "numbers"}, {"w": "5", "freq": 50000, "cat": "numbers"}, {"w": "6", "freq": 50000, "cat": "numbers"}, {"w": "7", "freq": 50000, "cat": "numbers"}, {"w": "8", "freq": 50000, "cat": "numbers"}, {"w": "9", "freq": 50000, "cat": "numbers"}]}
