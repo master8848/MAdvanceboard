@@ -12,6 +12,6 @@ pub mod store;
 
 pub use layout::{KeyMapping, LayoutRegistry, LayoutSpec, DEFAULT_LAYOUT_ID};
 pub use predictor::Predictor;
-pub use stack::{DictionaryStack, Suggestion};
+pub use stack::{DictionaryStack, SuggestOpts, Suggestion, TargetProbe};
 
 uniffi::setup_scaffolding!("kbcore");
