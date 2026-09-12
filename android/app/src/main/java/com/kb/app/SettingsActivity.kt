@@ -77,8 +77,113 @@ fun SettingsScreen() {
         Button(onClick = { context.startActivity(OnboardingActivity.intent(context)) }) {
             Text("Open enable-IME wizard")
         }
+        LayoutSettingsSection()
         GestureTuningSection()
     }
+}
+
+/**
+ * Settings → Layout (plan 02): global default (t9-9 / t9-12 / t9-16) plus
+ * the per-tab override list (e.g. EN→t9-9, NE→t9-16). Persisted by
+ * [LayoutStore] (same prefs file the IME service resolves per
+ * `active_tab`); changing a layout takes effect on the next tab switch
+ * or field start — labels re-encode from the newly loaded spec.
+ * Validation failures surface as an explicit Toast, never a silent keep.
+ */
+@Composable
+fun LayoutSettingsSection() {
+    val context = LocalContext.current
+    var error by remember { mutableStateOf<String?>(null) }
+    var savedTick by remember { mutableStateOf(0) }
+
+    fun readGlobal(): String = try {
+        LayoutStore.global(context)
+    } catch (e: Exception) {
+        error = "Layout prefs unreadable, showing default: ${e.message}"
+        com.kb.ime.DEFAULT_LAYOUT_ID
+    }
+
+    fun readOverrides(): Map<String, String> = try {
+        LayoutStore.overrides(context)
+    } catch (e: Exception) {
+        error = "Layout prefs unreadable: ${e.message}"
+        emptyMap()
+    }
+
+    var global by remember(savedTick) { mutableStateOf(readGlobal()) }
+    var overrides by remember(savedTick) { mutableStateOf(readOverrides()) }
+
+    Text(
+        "Layout", style = MaterialTheme.typography.headlineSmall,
+        modifier = Modifier.padding(top = 24.dp)
+    )
+    error?.let {
+        Text(it, color = MaterialTheme.colorScheme.error)
+    }
+
+    Text("Global default", style = MaterialTheme.typography.titleMedium)
+    Row(modifier = Modifier.fillMaxWidth()) {
+        SUPPORTED_LAYOUT_IDS.forEach { id ->
+            val short = id.removePrefix("t9-")
+            TextButton(onClick = {
+                try {
+                    LayoutStore.setGlobal(context, id)
+                    global = id
+                    error = null
+                } catch (e: Exception) {
+                    error = "Save failed: ${e.message}"
+                    Toast.makeText(context, "Layout not saved: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }) { Text(if (id == global) "[$short]" else short) }
+        }
+    }
+    Text(
+        "Applies to every tab without an override below. " +
+            "NE defaults to t9-16 (finer splits) until proven otherwise.",
+        style = MaterialTheme.typography.labelSmall
+    )
+
+    Text("Per-tab overrides", style = MaterialTheme.typography.titleMedium,
+        modifier = Modifier.padding(top = 8.dp))
+    LayoutStore.KNOWN_CATS.forEach { (cat, label) ->
+        val current = overrides[cat]
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                "$label${if (cat != label) " ($cat)" else ""}",
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(vertical = 12.dp)
+            )
+            TextButton(onClick = {
+                try {
+                    LayoutStore.clearCatLayout(context, cat)
+                    overrides = overrides - cat
+                    error = null
+                } catch (e: Exception) {
+                    error = "Clear failed: ${e.message}"
+                }
+            }) { Text(if (current == null) "[auto]" else "auto") }
+            SUPPORTED_LAYOUT_IDS.forEach { id ->
+                val short = id.removePrefix("t9-")
+                TextButton(onClick = {
+                    try {
+                        LayoutStore.setCatLayout(context, cat, id)
+                        overrides = overrides + (cat to id)
+                        error = null
+                    } catch (e: Exception) {
+                        error = "Save failed: ${e.message}"
+                        Toast.makeText(context, "Layout not saved: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
+                }) { Text(if (id == current) "[$short]" else short) }
+            }
+        }
+    }
+    Button(onClick = {
+        // Re-read from disk so external (IME-process) writes become visible.
+        savedTick++
+        global = readGlobal()
+        overrides = readOverrides()
+    }) { Text("Refresh layout settings") }
 }
 
 /**
