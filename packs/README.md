@@ -39,7 +39,7 @@ pack (`--f0/--alpha/--fmin`); existing freqs untouched. Canonical IDs gain
 | File | Pack `id` | Words | `freq` range | Notes |
 |---|---|---|---|---|
 | `words_en.json` | `words` | 5150 | 120..1000000 | EN core + common/tech + web2 tail |
-| `nepali.json` | `ne` | 8000 (v2.0.0) | 200..9000 | pipeline `w+tr` (HF 2.4M + wiki freq + 253 curated head); see Nepali rebuild below |
+| `nepali.json` | `ne` | 8005 (v2.0.1) | 200..9000 | pipeline `w+tr` (HF 2.4M + wiki freq + 253 curated head) + 5 first-person pronouns (`म/मलाई/मैले/मेरो/मेरी`, v2.0.1 data fix); see Nepali rebuild below |
 | `numbers.json` | `numbers` | 10 | 50000 | unchanged (builtin digit-commit) |
 | `code_js.json` | `js` | 396 | 500..9500 | core keywords + TS + DOM/Node/std methods (v1.2.0) |
 | `code_rust.json` | `rust` | 288 | 500..9500 | keywords + std traits/methods/macros/attrs; 26 `*2`/`*m` placeholders dropped (v1.2.0) |
@@ -104,6 +104,9 @@ extension manifest).
   (curated `tr` wins conflicts; HF top roman becomes `alt`).
 - Result: 253 curated + 7747 tail = **8000 rows**, `freq` 200..9000,
   every row has `tr`, zero all-`9` (matra-only) seqs in the index.
+  v2.0.1 appends 5 first-person pronouns missing from the pipeline
+  (`म/ma`, `मलाई/malai`, `मैले/maile` + alt `mailea`, `मेरो/mero`,
+  `मेरी/meri`) = **8005 rows**.
   Source CSV regenerated at `packs/sources/nepali.csv` (pipeline-owned;
   `seed_expansion.py` skips Nepali since).
 
