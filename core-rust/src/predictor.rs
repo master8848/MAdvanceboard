@@ -72,7 +72,7 @@ impl Predictor {
     /// Back-compat path: always the `t9-9` default layout.
     /// Types through the production per-tab policy
     /// ([`SuggestOpts::policy_for_tab`](crate::stack::SuggestOpts::policy_for_tab)):
-    /// neighbor matching OFF, code tabs hard-scoped to the active tab.
+    /// neighbor matching OFF, every tab hard-scoped to its own words.
     pub fn suggest(
         &self,
         ctx: String,
@@ -116,7 +116,7 @@ impl Predictor {
     /// per-cat override -> global default -> `t9-9` (see
     /// `LayoutRegistry::resolve`). Fallbacks are loud (see
     /// [`Self::take_last_layout_error`]). Types through the production
-    /// per-tab policy (neighbor OFF, code tabs hard-scoped).
+    /// per-tab policy (neighbor OFF, every tab hard-scoped).
     pub fn suggest_for_cat(
         &self,
         ctx: String,
@@ -566,6 +566,53 @@ impl Predictor {
         self.try_add_pack(&pack, priority)
     }
 
+    /// Register a user custom-category pack at runtime (names flow):
+    /// `id` names the new category tab, `wordlist` is pasted/imported
+    /// `word [freq]` text (see [`crate::pack::parse_user_wordlist`]),
+    /// `lang` stamps every row, `priority` must sit in `10-90` (plan/08).
+    /// Behaves like a first-class category tab from here on: isolated
+    /// ranking under its tab (custom-tab policy), personal-learn overlay
+    /// via `learn(word, id)`, enable toggle via [`Self::set_cat_enabled`].
+    /// Loud failure — a half-loaded category never installs.
+    ///
+    /// Plain Rust (not UniFFI-exported): mobile callers build the same
+    /// envelope with their local validator and install via the existing
+    /// `add_pack_json` FFI until the bindings regen exposes this.
+    pub fn try_add_user_pack(
+        &self,
+        id: &str,
+        title: &str,
+        wordlist: &str,
+        lang: &str,
+        priority: i32,
+    ) -> Result<Vec<String>, String> {
+        crate::pack::check_user_priority(priority).map_err(|e| {
+            format!("Predictor::try_add_user_pack: {e}")
+        })?;
+        let pack = crate::pack::build_user_pack(id, title, wordlist, lang).map_err(|e| {
+            format!("Predictor::try_add_user_pack: {e}")
+        })?;
+        self.try_add_pack(&pack, priority)
+    }
+
+    /// Enable/disable a category tab at runtime (user-pack toggle,
+    /// plan/08): a disabled cat suggests nothing anywhere until
+    /// re-enabled (see [`DictionaryStack::set_cat_enabled`]).
+    pub fn set_cat_enabled(&self, cat: &str, enabled: bool) {
+        self.inner
+            .lock()
+            .map(|mut i| i.stack.set_cat_enabled(cat, enabled))
+            .unwrap_or_else(|e| panic!("Predictor::set_cat_enabled: lock poisoned: {e}"));
+    }
+
+    /// True when `cat` contributes to suggest (installed and not disabled).
+    pub fn is_cat_enabled(&self, cat: &str) -> bool {
+        self.inner
+            .lock()
+            .map(|i| i.stack.is_cat_enabled(cat))
+            .unwrap_or_else(|e| panic!("Predictor::is_cat_enabled: lock poisoned: {e}"))
+    }
+
     // ---- Persistence: fallible Rust APIs (UniFFI-safe wrappers above) ----
 
     /// Flush dirty rows + pending events through the open store.
@@ -691,8 +738,12 @@ mod tests {
     #[test]
     fn layout02_default_and_per_cat_switching() {
         let p = Predictor::new(
+            // `fun` exists under both tabs: per-tab isolation scopes every
+            // suggest to the active tab, so layout-resolution assertions
+            // need same-tab content (cross-tab rows are hidden by design).
             r#"[{"w":"hello","freq":900,"cat":"EN"},
-                {"w":"fun","freq":150,"cat":"EN"}]"#
+                {"w":"fun","freq":150,"cat":"EN"},
+                {"w":"fun","freq":150,"cat":"NE"}]"#
                 .to_string(),
         );
         // Compiled defaults: global t9-9, NE override t9-16.
@@ -828,5 +879,51 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.contains("t9-99"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn user_pack_registers_isolated_tab_with_learn_overlay() {
+        // End-to-end names flow: register -> isolated suggest under the
+        // new tab -> personal learn overlay -> disable hides the tab.
+        let p = Predictor::new(
+            r#"[{"w":"bob","freq":900,"cat":"EN"}]"#.to_string(),
+        );
+        assert!(p.is_cat_enabled("names"));
+        p.try_add_user_pack("names", "Names", "coa 100\n", "en", 50).unwrap();
+        // Isolated: the names tab shows its own word, not EN "bob" (262).
+        let s = p.suggest("".to_string(), "262".to_string(), "names".to_string(), 5);
+        assert!(!s.is_empty());
+        assert!(s.iter().all(|c| c.cat == "names"), "got {:?}", s.iter().map(|c| &c.word).collect::<Vec<_>>());
+        assert_eq!(s[0].word, "coa");
+        // Personal-learn overlay under the custom tab.
+        p.learn("cob".to_string(), "names".to_string());
+        p.learn("cob".to_string(), "names".to_string());
+        let s2 = p.suggest("".to_string(), "262".to_string(), "names".to_string(), 5);
+        assert!(s2.iter().any(|c| c.word == "cob"), "learned word must suggest, got {:?}", s2.iter().map(|c| &c.word).collect::<Vec<_>>());
+        // Disable hides the tab; re-enable restores it.
+        p.set_cat_enabled("names", false);
+        assert!(!p.is_cat_enabled("names"));
+        assert!(p.suggest("".to_string(), "262".to_string(), "names".to_string(), 5).is_empty());
+        p.set_cat_enabled("names", true);
+        assert!(!p.suggest("".to_string(), "262".to_string(), "names".to_string(), 5).is_empty());
+    }
+
+    #[test]
+    fn user_pack_bad_imports_fail_loudly() {
+        let p = Predictor::new("[]".to_string());
+        // Bad priority (outside 10-90).
+        assert!(p.try_add_user_pack("names", "Names", "ava 100\n", "en", 5).is_err());
+        assert!(p.try_add_user_pack("names", "Names", "ava 100\n", "en", 100).is_err());
+        // Reserved id.
+        let err = p.try_add_user_pack("words", "Taken", "ava 100\n", "en", 50).unwrap_err();
+        assert!(err.contains("reserved"), "unexpected: {err}");
+        // Bad rows: exact per-row diagnostics, nothing installed.
+        let err = p.try_add_user_pack("names", "Names", "ava 100\nava 200\nbob 0\n", "en", 50).unwrap_err();
+        assert!(err.contains("duplicate"), "unexpected: {err}");
+        assert!(err.contains("out of range"), "unexpected: {err}");
+        assert!(p.suggest("".to_string(), "282".to_string(), "names".to_string(), 5).is_empty());
+        // Empty title / empty wordlist.
+        assert!(p.try_add_user_pack("names", "", "ava 100\n", "en", 50).is_err());
+        assert!(p.try_add_user_pack("names", "Names", "", "en", 50).is_err());
     }
 }

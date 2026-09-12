@@ -454,12 +454,12 @@ struct MergedRow {
 }
 
 /// Experimental tuning knobs for the suggest pipeline (plan/00 cheapest-first
-/// remedies, plan/09 spikes). `Default` reproduces the frozen behavior
-/// exactly (`include_prefix=true` at keyfit 0.9, neighbor on at 0.6, no tab
-/// filter); every experiment passes an explicit non-default value so deltas
-/// are measured, never silently applied. Keyfit values are contractually in
-/// `[0.0, 1.0]` (debug-asserted); out-of-range values are a caller bug, not
-/// clamped silently.
+/// remedies, plan/09 spikes). `Default` is the production behavior
+/// (`include_prefix=true` at keyfit 0.9, neighbor on at 0.6, hard per-tab
+/// filter ON); every experiment passes an explicit non-default value so
+/// deltas are measured, never silently applied. Keyfit values are
+/// contractually in `[0.0, 1.0]` (debug-asserted); out-of-range values are a
+/// caller bug, not clamped silently.
 #[derive(Clone, Debug)]
 pub struct SuggestOpts {
     /// Match prefix candidates (`seq` starts with `digits`) at `prefix_keyfit`.
@@ -470,9 +470,14 @@ pub struct SuggestOpts {
     pub include_neighbor: bool,
     /// Keyfit score for neighbor matches (frozen default 0.6).
     pub neighbor_keyfit: f64,
-    /// Keep only candidates whose display `cat` equals the active tab
-    /// (code-tab noise experiment). Personal rows learned under another tab
-    /// are dropped too — that collateral is part of the measured delta.
+    /// Scope candidates to the active tab BEFORE the merge (default ON):
+    /// a static row contributes only when its `cat` canonicalizes to the
+    /// tab ([`Self::tab_key`]), a personal-OOV row only when learned under
+    /// it — except the `★personal` tab, which aggregates the user's own
+    /// words across categories (see the module docs for the one exception).
+    /// Scoping pre-merge means display word/`cat` and summed frequencies
+    /// derive from tab-allowed contributors only. Set explicitly `false`
+    /// for cross-tab measurement arms (see [`Self::with_tab_filter`]).
     pub hard_tab_filter: bool,
 }
 
@@ -483,7 +488,7 @@ impl Default for SuggestOpts {
             prefix_keyfit: 0.9,
             include_neighbor: true,
             neighbor_keyfit: 0.6,
-            hard_tab_filter: false,
+            hard_tab_filter: true,
         }
     }
 }
@@ -510,6 +515,8 @@ impl SuggestOpts {
     /// prose distractors dominate their unions (measured held-out ON-arm
     /// +0.59 js / +0.55 medical under the hard filter; EN/NE
     /// unaffected-to-positive), so the production policy scopes them hard.
+    /// (Kept for measurement continuity; the filter itself is now default
+    /// ON for every tab — see [`Self::policy_for_tab`].)
     pub fn is_code_tab(active_tab: &str) -> bool {
         matches!(active_tab, "js" | "medical")
     }
@@ -531,26 +538,57 @@ impl SuggestOpts {
     /// Tabs whose unions scope hard to the active tab: code identifiers
     /// plus every user custom category (a custom tab shows its own words
     /// — the names-category isolation rule).
+    /// (Kept for measurement continuity; the filter itself is now default
+    /// ON for every tab — see [`Self::policy_for_tab`].)
     pub fn is_isolated_tab(active_tab: &str) -> bool {
         Self::is_code_tab(active_tab) || Self::is_custom_tab(active_tab)
     }
 
+    /// Canonical tab key for the isolation rule: lowercase with legacy
+    /// aliases folded in — `EN`/`en` → `words` (English base), `NE`/`nepali`
+    /// → `ne` (Nepali pack), `★personal` → `personal`. A static row is
+    /// tab-allowed iff `tab_key(row.cat) == tab_key(active_tab)`; a
+    /// personal-OOV row iff `tab_key(entry.category)` matches. Unknown
+    /// (custom) cats canonicalize to themselves, so a custom tab shows
+    /// exactly its own words. Empty canonicalizes to itself (matches
+    /// nothing); the UniFFI boundary maps `""` → `EN` before it reaches
+    /// here, so empty never filters a real query.
+    pub fn tab_key(tab: &str) -> String {
+        let lower = tab.to_lowercase();
+        match lower.as_str() {
+            "en" => "words".to_string(),
+            "ne" | "nepali" => "ne".to_string(),
+            "★personal" => "personal".to_string(),
+            _ => lower,
+        }
+    }
+
+    /// True when `active_tab` is the `★personal` aggregate view (either
+    /// spelling). The personal tab is the ONE general exception to
+    /// isolation: it shows the user's own words across categories, never
+    /// untouched static rows.
+    pub fn is_personal_tab(active_tab: &str) -> bool {
+        Self::tab_key(active_tab) == "personal"
+    }
+
     /// Production suggest policy per tab (Tier-0 NO-GO follow-up outcome):
     /// neighbor matching defaults OFF on every tab (+12.5pts scope top-3@4
-    /// on held-out, wins all four tabs) and isolated tabs (code tabs +
-    /// user custom categories) additionally scope
-    /// the union to the active tab before the truncate. Frozen entry points
-    /// (`suggest_at`, `SuggestOpts::default()`) are untouched — this is the
-    /// vehicle the keyboard actually types through.
+    /// on held-out, wins all four tabs) and EVERY tab scopes its union hard
+    /// to the active tab before the truncate (code-tab wins +0.59 js /
+    /// +0.55 medical; EN/NE unaffected-to-positive; custom tabs isolate to
+    /// their own words). Frozen entry points (`suggest_at`,
+    /// `SuggestOpts::default()`) apply the same filter — this policy is the
+    /// vehicle the keyboard actually types through, and the filter is not
+    /// opt-in anywhere.
     ///
     /// Per-tab neighbor opt-in lives here, not in a global toggle: pass
     /// `.with_neighbor(true)` for a tab only after a mis-press corpus
     /// clears 09#6's ≥30% failed-commit-reduction bar. No tab has cleared
     /// it, so none opts in today.
-    pub fn policy_for_tab(active_tab: &str) -> Self {
+    pub fn policy_for_tab(_active_tab: &str) -> Self {
         Self {
             include_neighbor: false,
-            hard_tab_filter: Self::is_isolated_tab(active_tab),
+            hard_tab_filter: true,
             ..Default::default()
         }
     }
@@ -560,6 +598,15 @@ impl SuggestOpts {
     /// measurable at the call site, never a silent global.
     pub fn with_neighbor(mut self, on: bool) -> Self {
         self.include_neighbor = on;
+        self
+    }
+
+    /// Per-tab isolation override (see [`Self::policy_for_tab`]): pass
+    /// `false` ONLY for cross-tab measurement arms (gate experiments that
+    /// quantify the filter's delta). Production paths never opt out — a
+    /// word from another category must never show in the active tab.
+    pub fn with_tab_filter(mut self, on: bool) -> Self {
+        self.hard_tab_filter = on;
         self
     }
 }
@@ -998,13 +1045,32 @@ impl DictionaryStack {
         self.decode_prefix_for_id(prefix, mapping.layout_id(), limit)
     }
 
+    /// Category boost under isolation: 1.0 when the row's `cat`
+    /// canonicalizes to the active tab ([`SuggestOpts::tab_key`], so legacy
+    /// `EN` and pack `words` boost each other, likewise `NE`/`ne`), 0.5
+    /// for the `★personal` aggregate view over the user's own words, else
+    /// 0.0. Under the default hard filter every surviving row scores 1.0
+    /// (or 0.5 on the personal tab) — the weight still separates the
+    /// unfiltered measurement arms.
     fn cat_boost(&self, entry_cat: &str, in_personal: bool, active_tab: &str) -> f64 {
-        if entry_cat == active_tab {
+        if SuggestOpts::tab_key(entry_cat) == SuggestOpts::tab_key(active_tab) {
             1.0
-        } else if in_personal && active_tab == "personal" {
+        } else if in_personal && SuggestOpts::is_personal_tab(active_tab) {
             0.5
         } else {
             0.0
+        }
+    }
+
+    /// Static-row side of the isolation rule: under the `★personal` tab a
+    /// row is allowed iff its word is in the live personal dict (the ONE
+    /// aggregate exception — the user's own words across categories);
+    /// under every other tab iff its `cat` canonicalizes to the tab.
+    fn static_row_allowed(&self, e: &DictEntry, tab: &str, personal_tab: bool) -> bool {
+        if personal_tab {
+            self.personal.get(&e.word).map(|p| !p.deleted).unwrap_or(false)
+        } else {
+            SuggestOpts::tab_key(&e.cat) == tab
         }
     }
 
@@ -1208,8 +1274,12 @@ impl DictionaryStack {
             return absent(0);
         }
         let mapping = LayoutRegistry::builtins_cached().get_or_default(DEFAULT_LAYOUT_ID);
-        let mut merged = self.build_union(
+        // Same union builder as the real path (isolation scoped inside),
+        // so `in_union=false` means an alias/encoding gap under the active
+        // tab — never a cross-tab row the real path would have kept.
+        let merged = self.build_union(
             digits,
+            active_tab,
             DEFAULT_LAYOUT_ID,
             &|e| {
                 (
@@ -1221,9 +1291,6 @@ impl DictionaryStack {
             opts,
             &is_one_edit_neighbor,
         );
-        if opts.hard_tab_filter {
-            merged.retain(|_, m| m.cat == active_tab);
-        }
         let union_size = merged.len();
         let mut items: Vec<MergedRow> = merged.into_values().collect();
         items.sort_by(|a, b| {
@@ -1445,9 +1512,18 @@ impl DictionaryStack {
     /// Build the suggest union (static rows + personal OOV) without
     /// truncating or scoring: shared by [`Self::suggest_inner`] and the
     /// step-1 miss instrumentation ([`Self::probe_target_at`]).
+    ///
+    /// Isolation is enforced HERE, before the merge, when
+    /// `opts.hard_tab_filter` (default ON): disallowed static rows never
+    /// contribute, so display word/`cat` and summed frequencies derive from
+    /// tab-allowed contributors only; disallowed personal-OOV rows never
+    /// enter. The prefix cache stays tab-agnostic (it memoizes row-index
+    /// sets; scoping applies at merge time), so mixed-tab keystroke
+    /// sequences stay byte-identical to cold runs.
     fn build_union(
         &self,
         digits: &str,
+        active_tab: &str,
         layout_id: &str,
         seqs_of: &dyn Fn(&DictEntry) -> (Cow<'_, str>, Cow<'_, [String]>),
         mapping: &dyn KeyMapping,
@@ -1461,6 +1537,12 @@ impl DictionaryStack {
         // collapsing to the first seq: frequencies sum, display follows
         // the highest-priority row, keyfit takes the max.
         let mut merged: HashMap<String, MergedRow> = HashMap::new();
+        // Isolation scope for this query (pre-merge): the canonical tab
+        // key once here, then a row-membership check per match (never per
+        // row — non-matching rows skip before it).
+        let tab = SuggestOpts::tab_key(active_tab);
+        let personal_tab = tab == "personal";
+        let scope = opts.hard_tab_filter;
         let keyfit_of = |eseq: &str| -> Option<f64> {
             if eseq == digits {
                 Some(1.0)
@@ -1491,7 +1573,7 @@ impl DictionaryStack {
             // Same match-any semantics as the scan below (best keyfit
             // across primary + aliases), merged in ascending row order so
             // first-wins display is identical.
-            self.merge_indexed(digits, layout_id, mapping, opts, &mut merged);
+            self.merge_indexed(digits, active_tab, layout_id, mapping, opts, &mut merged);
         } else {
             // Legacy per-entry scan: custom layouts with no index, or a
             // layout whose FST failed to build (explicit error via
@@ -1499,6 +1581,9 @@ impl DictionaryStack {
             // Ascending row indexes feed `merge_row`, matching the indexed
             // path's tie rules exactly.
             for (idx, e) in self.base.iter().chain(self.extensions.iter()).enumerate() {
+                if scope && !self.static_row_allowed(e, &tab, personal_tab) {
+                    continue;
+                }
                 let (primary, aliases) = seqs_of(e);
                 let Some(keyfit) = keyfit_any(&primary, &aliases) else {
                     continue;
@@ -1527,6 +1612,20 @@ impl DictionaryStack {
             // multi-byte custom codes too.)
             if p.word.chars().count() < digits.chars().count() {
                 continue;
+            }
+            // Personal overlay carries its category: an OOV learned under
+            // one tab never leaks into another. (The `★personal` aggregate
+            // tab is the one exception — it shows the user's own words
+            // across categories.)
+            if scope {
+                let pcat = if p.category.is_empty() {
+                    "personal"
+                } else {
+                    p.category.as_str()
+                };
+                if !(personal_tab || SuggestOpts::tab_key(pcat) == tab) {
+                    continue;
+                }
             }
             mapping.encode_word_into(&p.word, &mut enc_buf);
             if enc_buf.is_empty() {
@@ -1691,21 +1790,19 @@ impl DictionaryStack {
         let prev = ctx.split_whitespace().last().unwrap_or("").to_lowercase();
 
         // Union construction lives in `build_union` (shared with the probe);
-        // the merged set is already match-any over (primary, aliases).
-        let mut merged = self.build_union(
+        // the merged set is already match-any over (primary, aliases) AND
+        // already scoped to the active tab when `opts.hard_tab_filter`
+        // (default ON) — no post-merge retain: display word/`cat` and
+        // frequencies derive from tab-allowed contributors only.
+        let merged = self.build_union(
             digits,
+            active_tab,
             layout_id,
             seqs_of,
             mapping,
             opts,
             is_neighbor_edit,
         );
-        // Hard tab filter (code-tab experiment): scope the candidate set to
-        // the active tab BEFORE the freq truncate, so cross-tab distractors
-        // neither occupy truncate slots nor win ranking ties.
-        if opts.hard_tab_filter {
-            merged.retain(|_, m| m.cat == active_tab);
-        }
 
         // Cap matches at 200 before the top-N heap (SPEC). The pre-truncate
         // order must be a TOTAL order: `merged` is a HashMap (RandomState
@@ -1833,6 +1930,7 @@ impl DictionaryStack {
     fn merge_indexed(
         &self,
         digits: &str,
+        active_tab: &str,
         layout_id: &str,
         mapping: &dyn KeyMapping,
         opts: &SuggestOpts,
@@ -1863,7 +1961,7 @@ impl DictionaryStack {
                 if opts.include_neighbor {
                     self.merge_neighbors(digits, mapping, postings, opts.neighbor_keyfit, &mut hits);
                 }
-                self.merge_hits(layout_id, hits, merged);
+                self.merge_hits(active_tab, layout_id, hits, merged, opts);
                 return;
             }
             // Path 2: parent hit — exact+prefix matches only shrink as
@@ -1907,7 +2005,7 @@ impl DictionaryStack {
                     if opts.include_neighbor {
                         self.merge_neighbors(digits, mapping, postings, opts.neighbor_keyfit, &mut hits);
                     }
-                    self.merge_hits(layout_id, hits, merged);
+                    self.merge_hits(active_tab, layout_id, hits, merged, opts);
                     return;
                 }
             }
@@ -1964,7 +2062,7 @@ impl DictionaryStack {
         if opts.include_neighbor {
             self.merge_neighbors(digits, mapping, postings, opts.neighbor_keyfit, &mut hits);
         }
-        self.merge_hits(layout_id, hits, merged);
+        self.merge_hits(active_tab, layout_id, hits, merged, opts);
     }
 
     /// Record one phase hit: keep the best keyfit per row index so the
@@ -1984,12 +2082,25 @@ impl DictionaryStack {
     /// insertion-order independent by construction.
     fn merge_hits(
         &self,
+        active_tab: &str,
         layout_id: &str,
         hits: HashMap<u32, f64>,
         merged: &mut HashMap<String, MergedRow>,
+        opts: &SuggestOpts,
     ) {
+        // Pre-merge isolation scope (see `build_union`): disallowed rows
+        // never merge, so display/freq derive from tab-allowed
+        // contributors only. Tab-agnostic prefix-cache sets flow through
+        // here too — scoping at merge keeps mixed-tab sequences identical
+        // to cold runs.
+        let tab = SuggestOpts::tab_key(active_tab);
+        let personal_tab = tab == "personal";
+        let scope = opts.hard_tab_filter;
         for (idx, keyfit) in hits {
             let e = self.row(idx);
+            if scope && !self.static_row_allowed(e, &tab, personal_tab) {
+                continue;
+            }
             Self::merge_row(
                 merged,
                 idx,
@@ -2215,26 +2326,42 @@ mod tests {
     }
 
     #[test]
-    fn policy_hard_filters_only_code_tabs() {
-        for tab in ["js", "medical"] {
-            assert!(SuggestOpts::is_code_tab(tab), "{tab:?} is a code tab");
+    fn policy_hard_filters_every_tab() {
+        // Isolation is default-ON everywhere, not opt-in per tab: the
+        // policy scopes content, code, custom, and overlay tabs alike.
+        // (`""` maps to EN upstream, so it filters to nothing here — the
+        // UniFFI boundary never passes it through.)
+        for tab in [
+            "EN",
+            "words",
+            "NE",
+            "ne",
+            "numbers",
+            "js",
+            "medical",
+            "rust",
+            "html",
+            "emoji",
+            "math",
+            "personal",
+            "★personal",
+            "my_contacts",
+            "",
+        ] {
             assert!(
                 SuggestOpts::policy_for_tab(tab).hard_tab_filter,
                 "policy must hard-filter {tab:?}"
             );
         }
-        for tab in ["EN", "words", "NE", "personal", "emoji", ""] {
-            assert!(!SuggestOpts::is_code_tab(tab), "{tab:?} is not a code tab");
-            assert!(
-                !SuggestOpts::policy_for_tab(tab).hard_tab_filter,
-                "policy must not hard-filter {tab:?}"
-            );
-        }
+        assert!(SuggestOpts::default().hard_tab_filter);
+        // The opt-out vehicle is explicit and measurable, never silent.
+        assert!(!SuggestOpts::default().with_tab_filter(false).hard_tab_filter);
     }
 
     #[test]
     fn policy_matches_off_arm_on_prose_tabs() {
-        // On non-code tabs the policy IS the neighbor-OFF arm exactly.
+        // On single-cat fixtures the policy IS the neighbor-OFF arm
+        // exactly (the filter is a no-op with no cross-tab rows present).
         let stack = DictionaryStack::new(base());
         let now = crate::personal::now_quantized();
         let words = |s: Vec<Suggestion>| {
@@ -2252,8 +2379,8 @@ mod tests {
     #[test]
     fn policy_hard_filter_scopes_code_tabs() {
         // EN "hello"(43556, freq 900) outranks js "hellx"(43559, freq 50)
-        // at prefix 4355 under the unfiltered OFF arm; the js-tab policy
-        // must scope the union to js rows only.
+        // at prefix 4355 under the explicitly unfiltered OFF arm; the
+        // js-tab policy must scope the union to js rows only.
         let entries = DictionaryStack::load_base_json(
             r#"[{"w":"hello","freq":900,"cat":"EN"},
                 {"w":"hellx","freq":50,"cat":"js"}]"#,
@@ -2261,7 +2388,8 @@ mod tests {
         .unwrap();
         let stack = DictionaryStack::new(entries);
         let now = crate::personal::now_quantized();
-        let unfiltered = stack.suggest_no_neighbor_at("", "4355", "js", 5, now);
+        let nofilter = SuggestOpts::neighbor_off().with_tab_filter(false);
+        let unfiltered = stack.suggest_with_opts_at("", "4355", "js", 5, now, &nofilter);
         assert!(
             unfiltered.iter().any(|s| s.cat == "EN"),
             "fixture needs EN cross-tab noise, got {:?}",
@@ -2287,6 +2415,189 @@ mod tests {
         assert_eq!(
             policy.iter().map(|s| &s.word).collect::<Vec<_>>(),
             explicit.iter().map(|s| &s.word).collect::<Vec<_>>()
+        );
+    }
+
+    fn words_emoji_stack() -> DictionaryStack {
+        // English base (hello/hell/heart) + emoji pack (❤️ seq 432, alt
+        // heart): the heart/emoji-vs-English isolation fixture. Digits
+        // "43" prefix-match both tabs' rows, so every assertion below is
+        // load-bearing (the unfiltered union WOULD mix them).
+        let mut stack = DictionaryStack::new(
+            DictionaryStack::load_base_json(
+                r#"[{"w":"hello","freq":900,"cat":"EN"},
+                    {"w":"hell","freq":100,"cat":"EN"},
+                    {"w":"heart","freq":80,"cat":"EN"}]"#,
+            )
+            .unwrap(),
+        );
+        let pack = load_pack_str(
+            r#"{"id":"emoji","title":"Emoji","version":"1.0.0",
+                "words":[{"w":"❤️","seq":"432","freq":9000,"cat":"emoji","alt":["heart"]}]}"#,
+        )
+        .unwrap();
+        assert!(pack.validate().is_empty());
+        stack.add_pack(&pack, 40);
+        stack
+    }
+
+    #[test]
+    fn tab_key_folds_legacy_aliases() {
+        // Legacy display labels and pack ids canonicalize together, so IME
+        // asset ids (`words`/`ne`) and core legacy cats (`EN`/`NE`) scope
+        // identically. Custom cats canonicalize to themselves.
+        assert_eq!(SuggestOpts::tab_key("EN"), "words");
+        assert_eq!(SuggestOpts::tab_key("en"), "words");
+        assert_eq!(SuggestOpts::tab_key("words"), "words");
+        assert_eq!(SuggestOpts::tab_key("NE"), "ne");
+        assert_eq!(SuggestOpts::tab_key("ne"), "ne");
+        assert_eq!(SuggestOpts::tab_key("nepali"), "ne");
+        assert_eq!(SuggestOpts::tab_key("★personal"), "personal");
+        assert_eq!(SuggestOpts::tab_key("personal"), "personal");
+        assert_eq!(SuggestOpts::tab_key("emoji"), "emoji");
+        assert_eq!(SuggestOpts::tab_key("my_contacts"), "my_contacts");
+        assert!(SuggestOpts::is_personal_tab("personal"));
+        assert!(SuggestOpts::is_personal_tab("★personal"));
+        assert!(!SuggestOpts::is_personal_tab("words"));
+    }
+
+    #[test]
+    fn tab_isolation_heart_never_under_words() {
+        // heart/emoji must never appear under the English tab: English
+        // shows only English, on full seqs and prefix slices alike.
+        let stack = words_emoji_stack();
+        let now = crate::personal::now_quantized();
+        let heart_seq = encode_word("heart");
+        let s = stack.suggest_policy_at("", &heart_seq, "words", 30, now);
+        assert_eq!(s[0].word, "heart", "English heart must rank 1");
+        assert!(
+            s.iter().all(|c| SuggestOpts::tab_key(&c.cat) == "words"),
+            "words tab must show only English, got {:?}",
+            s.iter().map(|c| (&c.word, &c.cat)).collect::<Vec<_>>()
+        );
+        for digits in ["4", "43", "432", &heart_seq] {
+            let s = stack.suggest_policy_at("", digits, "words", 30, now);
+            assert!(
+                !s.is_empty(),
+                "words tab must keep its own rows at {digits}"
+            );
+            assert!(
+                s.iter().all(|c| c.word != "❤️"),
+                "❤️ must never show under words at {digits}, got {:?}",
+                s.iter().map(|c| &c.word).collect::<Vec<_>>()
+            );
+        }
+        // Legacy entry points filter identically (not opt-in).
+        let s = stack.suggest_at("", "43", "words", 30, now);
+        assert!(s.iter().all(|c| c.word != "❤️"));
+    }
+
+    #[test]
+    fn tab_isolation_hello_never_under_emoji() {
+        // ... and symmetrically: hello must never appear under emoji.
+        let stack = words_emoji_stack();
+        let now = crate::personal::now_quantized();
+        let s = stack.suggest_policy_at("", "432", "emoji", 30, now);
+        assert_eq!(s[0].word, "❤️", "❤️ must rank 1 under emoji");
+        // Every suggest path scopes, not just the policy vehicle.
+        let reg = LayoutRegistry::builtins_cached();
+        let t99 = reg.get_or_default("t9-9");
+        let paths: Vec<Vec<Suggestion>> = vec![
+            stack.suggest_at("", "43", "emoji", 30, now),
+            stack.suggest_no_neighbor_at("", "43", "emoji", 30, now),
+            stack.suggest_policy_at("", "43", "emoji", 30, now),
+            stack.suggest_for_layout_at("", "43", t99, "emoji", 30, now),
+            stack.suggest_for_layout_policy_at("", "43", t99, "emoji", 30, now),
+            stack.suggest_with_opts_at("", "43", "emoji", 30, now, &SuggestOpts::default()),
+        ];
+        for (i, s) in paths.iter().enumerate() {
+            assert!(
+                !s.is_empty(),
+                "path {i}: emoji tab must keep its own rows"
+            );
+            assert!(
+                s.iter().all(|c| SuggestOpts::tab_key(&c.cat) == "emoji"),
+                "path {i}: emoji tab must show only emoji, got {:?}",
+                s.iter().map(|c| (&c.word, &c.cat)).collect::<Vec<_>>()
+            );
+            assert!(
+                s.iter().all(|c| c.word != "hello" && c.word != "heart"),
+                "path {i}: English words must never show under emoji",
+            );
+        }
+        // The probe agrees (hello is outside the emoji union entirely).
+        let p = stack.probe_target_at("", "43", "emoji", "hello", 30, now, &SuggestOpts::default());
+        assert!(!p.in_union && p.top_rank.is_none());
+        // Explicit opt-out restores the cross-tab union for measurement.
+        let mixed = stack.suggest_with_opts_at(
+            "",
+            "43",
+            "emoji",
+            30,
+            now,
+            &SuggestOpts::default().with_tab_filter(false),
+        );
+        assert!(
+            mixed.iter().any(|c| c.word == "hello"),
+            "opt-out must restore cross-tab rows, got {:?}",
+            mixed.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn personal_overlay_scoped_to_learn_category() {
+        // An OOV learned under emoji must not leak into English (and vice
+        // versa); it shows under its own tab and the ★personal aggregate.
+        let mut stack = words_emoji_stack();
+        let now = crate::personal::now_quantized();
+        let seq = encode_word("heaz"); // 4329: no static row matches
+        assert!(
+            stack
+                .suggest_policy_at("", &seq, "emoji", 30, now)
+                .iter()
+                .all(|c| c.word != "heaz")
+        );
+        stack.personal.learn("heaz", "emoji");
+        stack.personal.learn("heaz", "emoji");
+        let under_emoji = stack.suggest_policy_at("", &seq, "emoji", 30, now);
+        assert!(
+            under_emoji.iter().any(|c| c.word == "heaz"),
+            "learned OOV must show under its tab, got {:?}",
+            under_emoji.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+        let under_words = stack.suggest_policy_at("", &seq, "words", 30, now);
+        assert!(
+            under_words.iter().all(|c| c.word != "heaz"),
+            "emoji-learned OOV must not leak into English, got {:?}",
+            under_words.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+        let under_personal = stack.suggest_policy_at("", &seq, "personal", 30, now);
+        assert!(
+            under_personal.iter().any(|c| c.word == "heaz"),
+            "★personal aggregates the user's own words, got {:?}",
+            under_personal.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn personal_tab_aggregates_own_words_only() {
+        // Static rows the user never touched never appear under ★personal;
+        // touched ones do (any learned category).
+        let mut stack = words_emoji_stack();
+        let now = crate::personal::now_quantized();
+        let untouched = stack.suggest_policy_at("", "43", "personal", 30, now);
+        assert!(
+            untouched.iter().all(|c| c.word != "hello" && c.word != "❤️"),
+            "untouched static rows must not show under ★personal, got {:?}",
+            untouched.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+        stack.personal.learn("hello", "words");
+        stack.personal.learn("hello", "words");
+        let touched = stack.suggest_policy_at("", "43556", "personal", 30, now);
+        assert!(
+            touched.iter().any(|c| c.word == "hello"),
+            "touched words aggregate under ★personal, got {:?}",
+            touched.iter().map(|c| &c.word).collect::<Vec<_>>()
         );
     }
 
@@ -2469,7 +2780,7 @@ mod tests {
     }
 
     #[test]
-    fn stack_priority_display_cat() {
+    fn stack_priority_display_cat_scoped_to_tab() {
         let mut stack = DictionaryStack::new(base());
         // Base "hello" is cat EN prio 0; extension redefines it as js prio 50.
         let pack = load_pack_str(
@@ -2478,9 +2789,28 @@ mod tests {
         )
         .unwrap();
         stack.add_pack(&pack, 50);
-        let s = stack.suggest("", "43556", "EN", 5);
+        let now = crate::personal::now_quantized();
+        // Isolation scopes BEFORE the merge: under EN only the EN row
+        // contributes, so display stays EN (the higher-priority js row
+        // cannot leak its label into the English tab — and the word is
+        // never lost from its home tab either).
+        let s = stack.suggest_at("", "43556", "EN", 5, now);
         let hello = s.iter().find(|c| c.word == "hello").unwrap();
-        assert_eq!(hello.cat, "js");
+        assert_eq!(hello.cat, "EN");
+        // ... while the js tab shows the js contributor alone.
+        let s = stack.suggest_at("", "43556", "js", 5, now);
+        assert_eq!(s.iter().find(|c| c.word == "hello").unwrap().cat, "js");
+        // The explicitly unfiltered arm keeps the legacy highest-priority
+        // display (js) for measurement continuity.
+        let s = stack.suggest_with_opts_at(
+            "",
+            "43556",
+            "EN",
+            5,
+            now,
+            &SuggestOpts::default().with_tab_filter(false),
+        );
+        assert_eq!(s.iter().find(|c| c.word == "hello").unwrap().cat, "js");
     }
 
     #[test]
@@ -2518,7 +2848,8 @@ mod tests {
         .unwrap();
         stack.add_pack(&pack, 50);
         // Merged display cat is emoji (higher priority); with active tab
-        // emoji it gets the full category boost.
+        // emoji it gets the full category boost. (Under isolation only the
+        // emoji row contributes here, so display is emoji either way.)
         let s = stack.suggest("", "386", "emoji", 5);
         assert_eq!(s[0].cat, "emoji");
     }
@@ -2540,7 +2871,10 @@ mod tests {
     }
 
     #[test]
-    fn custom_tabs_isolate_but_builtins_do_not() {
+    fn all_tabs_isolate_by_default() {
+        // Isolation helpers still classify tabs the same way, but the
+        // policy no longer branches on them: EVERY tab hard-filters (the
+        // filter is default-ON, not opt-in).
         for tab in ["js", "medical", "names", "my_contacts"] {
             assert!(SuggestOpts::is_custom_tab(tab) || SuggestOpts::is_code_tab(tab), "{tab}");
             assert!(SuggestOpts::is_isolated_tab(tab), "{tab}");
@@ -2552,21 +2886,21 @@ mod tests {
         for tab in ["EN", "words", "NE", "ne", "numbers", "emoji", "personal", "★personal", ""] {
             assert!(!SuggestOpts::is_custom_tab(tab), "{tab:?} is not custom");
             assert!(
-                !SuggestOpts::policy_for_tab(tab).hard_tab_filter || SuggestOpts::is_code_tab(tab),
-                "policy must not hard-filter {tab:?}"
+                SuggestOpts::policy_for_tab(tab).hard_tab_filter,
+                "policy must hard-filter {tab:?} too"
             );
         }
-        assert!(!SuggestOpts::policy_for_tab("words").hard_tab_filter);
-        assert!(!SuggestOpts::policy_for_tab("").hard_tab_filter);
     }
 
     #[test]
     fn custom_pack_suggest_isolates_to_own_words() {
         // EN "bob"(262, freq 900) outranks names "coa"(262, freq 100) in
-        // the unfiltered union; the names-tab policy must scope to names.
+        // the explicitly unfiltered union; the names-tab policy must scope
+        // to names.
         let stack = names_stack();
         let now = crate::personal::now_quantized();
-        let unfiltered = stack.suggest_no_neighbor_at("", "262", "names", 5, now);
+        let nofilter = SuggestOpts::neighbor_off().with_tab_filter(false);
+        let unfiltered = stack.suggest_with_opts_at("", "262", "names", 5, now, &nofilter);
         assert!(
             unfiltered.iter().any(|s| s.cat == "EN"),
             "fixture needs EN cross-tab noise, got {:?}",

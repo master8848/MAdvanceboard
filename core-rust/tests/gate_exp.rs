@@ -300,13 +300,17 @@ fn exp1b_cat_boost() {
 /// Step 2c — hard tab filter (scope candidates to the active tab before the
 /// truncate) under neighbor ON, all four tabs. Code tabs measure whether the
 /// filter removes cross-tab noise or destroys EN/NE recall via merged rows.
+/// (The filter is default-ON since per-tab isolation, so the no-filter arm
+/// is the explicit opt-out — the delta is the same measurement, arm names
+/// swapped.)
 #[test]
 fn exp1c_hard_tab_filter() {
     let now = frozen_now();
     let (base, held) = load_corpus();
-    let on = SuggestOpts::default();
-    let filt = SuggestOpts {
-        hard_tab_filter: true,
+    let filt = SuggestOpts::default();
+    assert!(filt.hard_tab_filter, "filter must be default-ON");
+    let on = SuggestOpts {
+        hard_tab_filter: false,
         ..SuggestOpts::default()
     };
     // Tab-aware arm (no EN+NE scope restriction here: code tabs included).
