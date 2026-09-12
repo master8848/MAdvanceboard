@@ -151,14 +151,26 @@ object CustomPackValidation {
 
     /**
      * Build the export document carrying every custom pack (envelope +
-     * priority + enabled). Import reverses it ([CustomPackStore.importJson]).
+     * priority + enabled) plus — when [stack] is non-null — the built-in
+     * `stack` section (`{id, priority, enabled}` in stack order, top
+     * first). Import reverses both ([CustomPackStore.importJson]); the
+     * priority sequence IS the order, so a re-export after import is
+     * byte-stable when nothing changed.
      */
-    fun exportJson(packs: List<CustomPack>): String {
+    fun exportJson(packs: List<CustomPack>, stack: List<StackEntry>? = null): String {
         val sorted = packs.sortedWith(compareByDescending<CustomPack> { it.priority }.thenBy { it.id })
         val items = sorted.joinToString(",") { p ->
             """{"id":${jsonString(p.id)},"title":${jsonString(p.title)},"priority":${p.priority},"enabled":${p.enabled},"pack":${p.packJson}}"""
         }
-        return """{"packs":[$items]}"""
+        val stackJson = if (stack == null) {
+            ""
+        } else {
+            val entries = stack.joinToString(",") { e ->
+                """{"id":${jsonString(e.id)},"priority":${e.priority},"enabled":${e.enabled}}"""
+            }
+            ""","stack":[$entries]"""
+        }
+        return """{"packs":[$items]$stackJson}"""
     }
 
     internal fun jsonString(s: String): String {
@@ -283,6 +295,29 @@ object CustomPackStore {
         }
     }
 
+    /**
+     * Rewrite a pack's stack priority (10-90) without touching its
+     * envelope: the reorder path ([DictStackOrder.respace]). Validates
+     * loudly; unknown ids and out-of-range values throw
+     * [IllegalArgumentException], never a silent clamp.
+     */
+    fun setPriority(context: Context, id: String, priority: Int) {
+        CustomPackValidation.validatePriority(priority)?.let {
+            throw IllegalArgumentException(it)
+        }
+        try {
+            val p = prefs(context)
+            if (!idSet(p).contains(id)) {
+                throw IllegalArgumentException("unknown custom pack \"$id\"")
+            }
+            p.edit().putInt("pack_${id}_prio", priority).apply()
+        } catch (e: IllegalArgumentException) {
+            throw e
+        } catch (e: Exception) {
+            throw IllegalStateException("Could not set priority for custom pack \"$id\": ${e.message}", e)
+        }
+    }
+
     fun remove(context: Context, id: String) {
         try {
             val p = prefs(context)
@@ -303,12 +338,18 @@ object CustomPackStore {
     }
 
     /** Export document carrying all packs (see [CustomPackValidation.exportJson]). */
-    fun exportJson(context: Context): String = CustomPackValidation.exportJson(list(context))
+    fun exportJson(context: Context): String =
+        CustomPackValidation.exportJson(list(context), DictStackOrder.builtinEntries(context))
 
     /**
      * Import an [exportJson] document. Strict: every pack validates, and
      * ANY failure aborts the whole import with all per-pack causes —
      * never a partial import. Unknown JSON shape is an explicit error.
+     * The optional `stack` section (built-in `{id, priority, enabled}`
+     * entries, see [CustomPackValidation.exportJson]) applies to
+     * [PackOrderStore] after the custom packs; absent means built-ins are
+     * left untouched. Every stack entry validates before anything is
+     * written.
      */
     fun importJson(context: Context, json: String): List<CustomPack> {
         val parsed: List<Triple<String, String, org.json.JSONObject>> = try {
@@ -348,6 +389,24 @@ object CustomPackStore {
             }
             Staged(id, CustomPack(id, title, envelope, priority, enabled))
         }
+        val stackEntries: List<StackEntry> = try {
+            val root = org.json.JSONObject(json)
+            val arr = root.optJSONArray("stack") ?: org.json.JSONArray()
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                val id = o.optString("id", "")
+                val priority = if (o.has("priority")) o.optInt("priority", -1) else -1
+                val enabled = o.optBoolean("enabled", true)
+                DictStackOrder.validateStackEntry(id, priority)?.let {
+                    throw IllegalArgumentException(it)
+                }
+                StackEntry(id, priority, enabled)
+            }
+        } catch (e: IllegalArgumentException) {
+            throw e
+        } catch (e: Exception) {
+            throw IllegalArgumentException("import: invalid \"stack\" section (${e.message})")
+        }
         try {
             val p = prefs(context)
             val ids = idSet(p)
@@ -360,6 +419,13 @@ object CustomPackStore {
                     .putBoolean("pack_${s.id}_enabled", s.pack.enabled)
             }
             ed.putStringSet(KEY_IDS, ids).apply()
+            if (stackEntries.isNotEmpty()) {
+                PackOrderStore.applyStack(context, stackEntries)
+            }
+        } catch (e: IllegalArgumentException) {
+            throw e
+        } catch (e: IllegalStateException) {
+            throw e
         } catch (e: Exception) {
             throw IllegalStateException("import: could not persist packs (${e.message})", e)
         }
