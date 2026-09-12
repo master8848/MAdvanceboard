@@ -40,6 +40,7 @@ pub struct Suggestion {
     pub layout_id: String,
 }
 
+#[derive(Clone)]
 pub struct DictionaryStack {
     base: Vec<DictEntry>,
     extensions: Vec<DictEntry>,
