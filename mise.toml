@@ -12,7 +12,7 @@ java = "17"
 gradle = "9.7.1"
 just = "latest"
 # scripts/build_pack.py + JSON validation of packs/*.json.
-python = "3.12"
+python = "3.14"
 # Repo prefers bun per env; no JS in repo yet — convenience only.
 bun = "latest"
 
