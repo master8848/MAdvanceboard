@@ -93,13 +93,20 @@ fields), **not** the dev-time `packs/*.json` wordlists
   static `grep` checks (`grep -rn INTERNET android/ime/ android/app/src` →
   no hits for BIND-only). All Android reports to date are static-only for this
   reason (`android/QA_REPORT.md` header; `android/FIX_REPORT.md` §Known remaining).
-- **`uniffi-bindgen 0.32` regen.** Bindgen version must match the crate
-  (`uniffi 0.32.1` in `core-rust/Cargo.toml` + `Cargo.lock`). After adding the
-  core `reject(word)` UniFFI export (`record_reject` is core-internal today),
-  regenerate Kotlin bindings and replace `StubPredictor`
-  (`android/core-bridge/…/Predictor.kt`) with the generated `Predictor`;
-  then wire active-tab ids + limit 3/30 + base wordlist JSON
-  (`FINAL_RECONCILE.md` §§2, 5).
+- **`uniffi-bindgen 0.32` regen (LANDED).** Bindgen version must match the
+  crate (`uniffi 0.32.1` in `core-rust/Cargo.toml` + `Cargo.lock`).
+  Regen ran with `uniffi-bindgen 0.32.1`
+  (`uniffi-bindgen generate --library target/debug/libkbcore.dylib
+  --language kotlin` from `core-rust/`); output vendored at
+  `android/core-bridge/src/main/java/uniffi/kbcore/kbcore.kt`.
+  Reconciliation: `reject(word)` / `reject_with_shown` ARE UniFFI-exported
+  (`predictor.rs:314,320`); `record_reject` is the core-internal personal
+  op they delegate to — no core change was needed, only this doc line.
+  `UniFfiPredictor` (backed by the generated `uniffi.kbcore.Predictor`) is
+  the default path; `StubPredictor` is degraded-only with a user-visible
+  message. Active-tab ids + limit 3/30 + base wordlist JSON wired via
+  `PredictorFactory` (`FINAL_RECONCILE.md` §§2, 5). Re-regen after ANY
+  `#[uniffi::export]` change, or symbols mismatch `libkbcore.so`.
 - **Stable-shim note.** The repo pins `mise.toml` `rust = "stable"` while
   `core-rust` documents `uniffi 0.32 build feature` compatibility
   (`core-rust/README.md` §Layout). If a future stable toolchain breaks the

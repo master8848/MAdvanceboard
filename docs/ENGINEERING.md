@@ -7,7 +7,8 @@ Normative spec: `SPEC.md`. Research framing: `docs/INTENT.md`. Build/run:
 ## 1. Architecture
 
 - **Rust core (`core-rust/`, crate `kbcore`).** Android-free engine:
-  `src/mapping.rs` (9-key encode, Devanagari collapse, 1-edit adjacency),
+  `src/mapping.rs` (layout-driven encode via `LayoutSpec`, t9-9 default;
+  Devanagari collapse, 1-edit adjacency),
   `src/stack.rs` (dictionary stack + `fst` sequence-index `SetBuilder`/`Set`
   with prefix stream), `src/rank.rs` (scoring + `RankWeights`), `src/personal.rs`
   (personal overlay: counts, `last_seen`, LFU 10k cap, `redb` persistence via
@@ -19,16 +20,23 @@ Normative spec: `SPEC.md`. Research framing: `docs/INTENT.md`. Build/run:
   (`INTEGRATION_REPORT.md` §6.2).
 - **FFI (`predictor.rs`, UniFFI 0.32, narrow).** UDL-less proc-macro surface
   (`setup_scaffolding!`, `#[derive(uniffi::Object)]`, `#[uniffi::export]`,
-  `Suggestion` record). Methods: `new(base_json)`,
-  `suggest(ctx, digits, active_tab, limit)`, `learn(word, category)`,
-  `forget(word)`, `export_session()`. Batch-string discipline: JSON wordlist
-  in, JSONL session out — no per-word FFI chatter. Bumped 0.29→0.32, build
-  green; Kotlin side must regen with `uniffi-bindgen 0.32` or symbols mismatch
+  `Suggestion` record (`word`, `score`, `seq`, `cat`, `layout_id`).
+  Methods: `new(base_json)`, `suggest(ctx, digits, active_tab, limit)`,
+  `suggest_with_layout` / `suggest_for_cat`, `learn(word, category)` /
+  `learn_with_shown`, `forget(word)`, `reject(word)` / `reject_with_shown`
+  (delegating to core-internal `record_reject`), `export_session()`, plus
+  layout (`encode` / `decode` / `layouts` / cat-map) and persist
+  (`open_persist` / `flush_persist` / `compact_persist`) passthroughs.
+  Batch-string discipline: JSON wordlist in, JSONL session out — no per-word
+  FFI chatter; one `suggest` call per keystroke. Bumped 0.29→0.32, build
+  green; Kotlin bindings regenerated with `uniffi-bindgen 0.32.1`
+  (`android/core-bridge/src/main/java/uniffi/kbcore/kbcore.kt`) — bindgen
+  version must match the crate or symbols mismatch
   (`INTEGRATION_REPORT.md` §2; `FINAL_RECONCILE.md` §5).
 - **Android IME (hybrid Views + Compose).** `android/ime/`:
   `KbInputMethodService` (lifecycle, `InputMode` TEXT/NUMBER/PHONE/DATETIME,
   `shouldLearnNow()` gate, per-keystroke `suggest`, `learn` on commit),
-  9-key `KeyPadView` + full QWERTY `QwertyView` (shared Predictor path, only
+  9-key `KeyPadView` (default board) + full QWERTY `QwertyView` (shared Predictor path, only
   the encoder differs), Compose `SuggestionStrip` (`LazyRow`, 3 inline),
   category `TabRow`, expand-all list. Manifests in
   `ime/src/main/assets/categories/*.json`. Stack: AGP 9.4.0, Gradle 9.6.0,
@@ -112,7 +120,7 @@ S(w) = 1.0*log10(freq_base + freq_personal + 1)
 | `rank` | candidate + ctx + weights | `S(w)` score | `RankWeights::default()`; hide threshold `-0.5` (`core-rust/src/rank.rs`) |
 | `personal` | accept / reject / block | overlay counts + tombstones | LFU 10k, tombstones exempt; redb + JSONL roundtrips (`core-rust/src/personal.rs`) |
 | `session` | accept/reject events | `export_jsonl` / `import_jsonl` | deterministic replay (`core-rust/src/session.rs`) |
-| `predictor` (UniFFI) | JSON wordlist; `(ctx, digits, active_tab, limit)` | `Suggestion` records; JSONL session | narrow FFI; `reject(word)` not yet exported — `record_reject` is core-internal (`core-rust/src/predictor.rs`) |
+| `predictor` (UniFFI) | JSON wordlist; `(ctx, digits, active_tab, limit)` | `Suggestion` records; JSONL session | narrow FFI; `reject(word)` / `reject_with_shown` ARE exported (`core-rust/src/predictor.rs:314,320`); `record_reject` is the core-internal personal-overlay op they delegate to. Kotlin regen verified with `uniffi-bindgen 0.32.1` (see `android/core-bridge/src/main/java/uniffi/kbcore/kbcore.kt`) |
 | `plugin-api` | category asset JSON | `CategoryProvider` entries | `opt*` parsing, forward-compatible (`android/plugin-api/…/CategoryRegistry.kt`) |
 | `core-bridge` | suggest/learn/forget/reject/export calls | candidates / ack | `Dispatchers.Default`, no `Context`; stub until bindgen regen (`android/core-bridge/…/Predictor.kt`) |
 | `sync` | local files / Room rows | merged personal table | LWW + tombstone-wins, 24h `WorkManager`, opt-in only (`android/sync/…/SyncWorker.kt`, `SyncMerge.kt`) |
@@ -151,13 +159,21 @@ S(w) = 1.0*log10(freq_base + freq_personal + 1)
    `sync.rs` (snapshot `.gz` + WAL append/replay + max-merge + recovery).
    Shape when it lands: one `Database` behind the existing `Mutex<Inner>`
    (single writer = core logging thread) (`INTEGRATION_REPORT.md` §§4B, 6.2).
-2. **Bridge regen outstanding.** `StubPredictor` (`suggest(seq, prev, limit)`
-   / `learn(word, prev)`) drops `active_tab`, returns no `seq`/score, has no
-   `reject` path, no `placement()`, no export/import wiring. Needs: core
-   `reject(word)` UniFFI export + `uniffi-bindgen 0.32` regen + wire
-   active-tab ids, limit 3/30, base wordlist JSON, delete-within-5s → `reject`,
-   explicit block → `forget` (`INTEGRATION_REPORT.md` §4A; `FINAL_RECONCILE.md`
-   §§2, 5).
+2. **Bridge regen landed (this change).** `uniffi-bindgen 0.32.1`
+   output vendored at `android/core-bridge/.../uniffi/kbcore/kbcore.kt`;
+   `Predictor` bridge interface mirrors the full export surface
+   (`suggest_with_layout(ctx, digits, layout_id, active_tab, limit)`,
+   `learn(word, category)` + `learn_with_shown`, `reject` +
+   `reject_with_shown`, `forget`, `export_session`, layout/persist
+   passthroughs; `ScoredCandidate` carries `seq`/`score`/`cat`/`layout_id`).
+   `UniFfiPredictor` is the default path; `StubPredictor` remains ONLY as the
+   explicit degraded path when `libkbcore.so` is absent (`KbCore.isAvailable()
+   == false` surfaces in the IME status line, never silently).
+   Delete-within-5s → `reject`, explicit block → `forget`, limit 3/30,
+   base wordlist JSON via `PredictorFactory` (`INTEGRATION_REPORT.md` §4A;
+   `FINAL_RECONCILE.md` §§2, 5). Still open: `placement()` has no core
+   UniFFI export (stack-only, `stack.rs:1521`) — long-press popup stays
+   local until a core export lands.
 3. **JDK build pending.** All Android verification so far is static (no JDK in
    env): `assembleDebug` + lint (`NewApi` on the API-28+ IME-switch call) +
    on-device smoke test still owed (`android/FIX_REPORT.md` §Known remaining).
