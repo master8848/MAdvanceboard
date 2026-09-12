@@ -12,6 +12,10 @@ Source: 5 research tracks (encoding gate, gesture-as-action, Nepali transliterat
 - **Tier-3 Extension:** `07-code-math-palettes.md`, `08-dict-stack-ordering.md` — which tabs reuse `suggest()` vs palette, drag-drop priorities.
 - **Tier-4 Open:** `09-research-open-questions.md` — novel/unsure, needs spikes.
 - **Order:** `10-execution-order.md` — dependency graph. User compiles later; plan only.
+- **Privacy switch:** `11-incognito-clipboard.md` — learn always local (no off-toggle); incognito is the off-switch; clipboard history with pins + 7-day TTL.
+- **Gates split:** `12-snippet-vs-learn-gates.md` — snippet exempt (`tab != numbers`, 2-min RAM, delete-after-expand); learn stays `privacy.learn`.
+- **Temporal:** `13-temporal-contextual-suggestions.md` — Gboard/SwiftKey pattern (re-rank after prefix + separate routine row, never empty-strip push); P1 8-bucket SQLite sprinkle, P2 routine row, P3 monthly deferred.
+- **DB indexes:** `14-db-indexing.md` — today only PKs, zero secondary; index set lands after `06` single-handle.
 
 ## Rules across all tiers
 

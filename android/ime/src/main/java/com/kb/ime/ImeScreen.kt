@@ -38,7 +38,8 @@ import kotlinx.coroutines.delay
  * [candidates] are live results fed by the host service from
  * Predictor.suggest (shared T9/QWERTY path) — never hardcoded here.
  * [activeLayoutId] reflects the service's pad; [onLayoutChanged] persists
- * the user's toggle (PadModeStore) and swaps the pad.
+ * the pick as the per-tab override ([LayoutStore]) and swaps the pad.
+ * [activeTabLabel] names the tab the toggle applies to.
  *
  * Plan 01 additions (all optional params, all duplicated by visible UI):
  * - [symbolsOptions]/[onSymbolPick]/[onSymbolsDismiss]: long-press symbols
@@ -61,6 +62,8 @@ fun ImeScreen(
     onCategoryChanged: (String) -> Unit = {},
     activeLayoutId: String = "t9-9",
     onLayoutChanged: (String) -> Unit = {},
+    /** Tab the pad-size toggle applies to (per-tab override caption). */
+    activeTabLabel: String = "words",
     symbolsOptions: List<String> = emptyList(),
     symbolsTitle: String = "",
     onSymbolPick: (String) -> Unit = {},
@@ -140,10 +143,12 @@ fun ImeScreen(
                 )
             )
         }
-        // Pad-size toggle: 9/12/16 segmented selector. Category tabs above
-        // are unaffected; the host swaps the PadView on selection.
+        // Pad-size toggle: 9/12/16 per-tab override (plan/02). Switching
+        // tabs re-resolves the engine + pad via the host; labels come
+        // from the newly loaded spec.
         PadSizeToggle(
             activeLayoutId = activeLayoutId,
+            activeTabLabel = activeTabLabel,
             onSelect = onLayoutChanged
         )
         if (statusLine != null) {
@@ -398,19 +403,22 @@ fun ExpandAllList(
 
 /**
  * 9/12/16 pad-size toggle. Selected id renders bracketed (`[12]`);
- * selection flows to the host, which persists it (PadModeStore) and swaps
- * the PadView. Category tabs and the QWERTY toggle are unaffected.
+ * selection flows to the host, which persists it as the per-tab override
+ * ([LayoutStore]) and swaps the PadView. The caption names the owning tab
+ * so the per-tab scope is visible. Category tabs and the QWERTY toggle
+ * are unaffected.
  */
 @Composable
 fun PadSizeToggle(
     activeLayoutId: String,
     onSelect: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    activeTabLabel: String = ""
 ) {
     val options = listOf("t9-9" to "9", "t9-12" to "12", "t9-16" to "16")
     Row(modifier = modifier.fillMaxWidth()) {
         Text(
-            text = "Pad:",
+            text = if (activeTabLabel.isEmpty()) "Pad:" else "Pad ($activeTabLabel):",
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
         )
         options.forEach { (id, short) ->

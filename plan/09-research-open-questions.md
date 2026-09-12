@@ -15,17 +15,15 @@ For genuinely unsure / novel areas. Each is a time-boxed spike with falsifiable 
 
 ## 3. Schwa-deletion + variant explosion (NE) — alias cap vs collision trade curve
 
-- Generate aliases via IAST→casual rules + manual overrides (`shabdakosha`, `nepali_unicoder`). For cap = 0,1,2,3 per headword, count 9-key buckets with >N colliding candidates (N=4-5, suggestion-noise limit). Plot collisions-per-bucket vs cap. Within collided bucket, Leipzig freq breaks ties — not alphabetical/insertion order.
+- Owner: don't freeze cap upfront — measure how each choice changes buckets, then pick best fit for app. Generate aliases via IAST→casual rules + manual overrides (`shabdakosha`, `nepali_unicoder`). For cap = 0,1,2,3 per headword, count 9-key buckets with >N colliding candidates (N=4-5, suggestion-noise limit). Plot collisions-per-bucket vs cap. Within collided bucket, Leipzig freq breaks ties — not alphabetical/insertion order.
 
-## 4. Local-scope token/snippet packs for code categories (rescoped — characters, not logic)
+## 4. Local-scope token/snippet packs for code categories (rescoped — ephemeral, 2-min, no index)
 
-Scope is narrowed: keyboard makes *characters* cheaper, not *logic*. No multi-token intent guessing, no next-line prediction, no tiny LM. Three pieces only:
+Owner decision: no context, no file scan, no LSP, no cross-file index. If user types `if` suggest `if (`; once written suggest next 2-3 syntax tokens (`{ } : ; ` " '`) in same layout. All suggestions, never auto-writing. Hold max 2-3 tokens in keyboard memory, TTL ~2 min, delete after snippet expansion done. Little at a time.
 
-- Static per-language token pack (keywords, common stdlib names, common punctuation clusters `();`, `=>`, `->`) ranked by corpus frequency — just another vocab plugin, same architecture as medical/Nepali packs.
-- Lightweight *local* frequency table scanning current file's tokens (not parsing, not LSP) so identifiers typed once (`userId`, `fetchData`) suggest again — sliding window over last N files/edits with decay (e.g. halve every edit-session), stale files don't pollute.
-- Optional single-level snippet expansion (`if`→`if () {}` with tab stops) — macro expansion, not generation. No sentence context.
+Scope: static per-language token pack (keywords, stdlib names, `(); => ->`) ranked by corpus freq — just another vocab plugin — plus this 2-min snippet helper. That's it. No sentence context, no next-line.
 
-Spike question: does doc-level token table beat frequency-alone for identifier recall, staying under 50ms with plain hash map — not "can LM fit on phone." Snippet tab-stop UX is separate usability test: 5-10 testers timed on canonical snippets (function signature, if-block, import line), watch confusion points.
+Spike question: does 2-min helper beat static-alone for identifier recall, <50ms plain hash map. Snippet UX separate: 5-10 testers timed on canonical snippets (function signature, if-block, import line), watch confusion.
 
 ## 5. Structural math navigation — usability, not corpus
 

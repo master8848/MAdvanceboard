@@ -108,3 +108,12 @@ use `just test-core` / `just validate-packs` instead. The IME runs without
 engine needs the `uniffi-bindgen 0.32` binding swap first. APK output lands
 under `android/app/build/outputs/apk/debug/` and
 `android/ime/build/outputs/aar/` (standard Gradle locations, not checked in).
+
+## License
+
+MAdvanceboard — 9-key predictive keyboard (just like Gboard).
+Copyright (C) 2026 Saurav Sanjel.
+
+Licensed under **GPL-3.0-only** — see [`LICENSE`](LICENSE). No warranty.
+Copying and selling as closed-source is not permitted: any distribution
+must share full source under the same license.

@@ -2,12 +2,13 @@
 
 Question: does 9-key single-tap + shared `suggest()` clear a bar worth building on?
 
-## Thresholds (freeze before measuring)
+## Metrics in plain language (new to keyboards — read this first)
 
-- `KSPW ≤ 1.5` on EN+NE freq-weighted set (type-until-in-top-3 + 1 select tap). Lenient; fails only if ranking/prefix broken.
-- `top-3 @ 4-digit prefix ≥ 85%` exact-seq, neighbor ON. Operating point is 4 digits, never 3 (3-digit: 8^3=512 buckets for 5k words, measured top-3 ~24% — hopeless by theory).
-- `learning lift ≥ 10pts` top-3@4 on repeat-word subset, paired A/B frozen-base vs +personal replay (2 accepts + 1 bigram context).
-- Report neighbor ON vs OFF separately (1-edit expands candidates ~8x at 4 digits: typo-tolerance vs precision cost).
+- `top-3@4`: type first 4 keys of a word (e.g. `hell` → `4355`). Was the word you wanted in the top-3 suggestions? Score = % of test words where yes. Example: 85% means 85 of 100 words found within 4 taps + 1 select-tap. Primary accuracy metric for tuning (#1).
+- `KSPW` (keystrokes-per-word): total taps ÷ words, including the tap to pick a suggestion. Example: type `4355` (4) + tap #1 (1) = 5 taps for `hello` → but `hello` is 5 letters so KSPW=1.0 here. QWERTY baseline ~1.0 + corrections; T9 target ≤1.5 means you save taps vs typing every letter + fixing fat-finger errors. Gate metric.
+- `KSR` (keystroke-saving rate): `(letters − taps) ÷ letters`. Example: `hello` 5 letters in 4+1=5 taps → KSR=0%. If found in 3+1=4 taps → KSR=20%. Same info as KSPW, but per-word % — better for longitudinal (#7) distribution (some users save a lot, some little; mean hides it). Use KSR day-0 vs day-7 per user.
+
+Freeze: tuning uses `top-3@4`; gate uses `KSPW≤1.5` + `top-3@4≥85%`; longitudinal uses `KSR` distribution.
 
 ## Why 4 digits
 

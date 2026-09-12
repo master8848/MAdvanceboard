@@ -1,10 +1,14 @@
 package com.kb.ime
 
 import android.content.Context
-import android.content.SharedPreferences
 
 /**
  * Persists the user's pad-size toggle (`t9-9` / `t9-12` / `t9-16`).
+ *
+ * Compat shim over [LayoutStore.global]: new code should use
+ * [LayoutStore] (global default + per-category overrides,
+ * `plan/02-layout-global-percat.md`). Kept so existing call sites
+ * (service startup, toggle commit) keep working unchanged.
  *
  * SharedPreferences (not DataStore) on purpose: the `:ime` process stays
  * lean (no Room/Work/DataStore — see the module's no-`:sync` rule), and a
@@ -15,26 +19,17 @@ object PadModeStore {
     const val PREFS_NAME = "kb_pad_prefs"
     const val KEY_LAYOUT_ID = "pad_layout_id"
 
-    private fun prefs(context: Context): SharedPreferences =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    /** Stored global layout id, or [DEFAULT_LAYOUT_ID] when unset/unknown. */
+    fun load(context: Context): String = LayoutStore.global(context)
 
-    /** Stored layout id, or [DEFAULT_LAYOUT_ID] when unset/unknown. */
-    fun load(context: Context): String {
-        val stored = try {
-            prefs(context).getString(KEY_LAYOUT_ID, DEFAULT_LAYOUT_ID)
-        } catch (_: Exception) {
-            DEFAULT_LAYOUT_ID
-        }
-        return if (stored in SUPPORTED_LAYOUT_IDS) stored!! else DEFAULT_LAYOUT_ID
-    }
-
-    /** Persists [layoutId]; unknown ids are ignored. Returns stored value. */
+    /**
+     * Persists [layoutId] as the global default. Unknown ids throw
+     * [IllegalArgumentException] (explicit, via [LayoutStore]); the
+     * previous value is returned unchanged only when the write itself
+     * fails at the framework level.
+     */
     fun save(context: Context, layoutId: String): String {
-        if (layoutId !in SUPPORTED_LAYOUT_IDS) return load(context)
-        try {
-            prefs(context).edit().putString(KEY_LAYOUT_ID, layoutId).apply()
-        } catch (_: Exception) {
-        }
+        LayoutStore.setGlobal(context, layoutId)
         return layoutId
     }
 }

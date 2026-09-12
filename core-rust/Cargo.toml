@@ -3,7 +3,7 @@ name = "kbcore"
 version = "0.1.0"
 edition = "2021"
 description = "9-key T9 predictive text engine core (no Android deps)"
-license = "MIT"
+license = "GPL-3.0-only"
 
 [lib]
 name = "kbcore"

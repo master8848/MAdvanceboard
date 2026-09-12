@@ -27,9 +27,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import android.widget.Toast
 import com.kb.ime.GestureLog
 import com.kb.ime.GestureThresholds
 import com.kb.ime.GestureTuningStore
+import com.kb.ime.LayoutStore
+import com.kb.ime.SUPPORTED_LAYOUT_IDS
 import com.kb.sync.SyncPreferences
 import com.kb.sync.SyncWorker
 import kotlinx.coroutines.launch

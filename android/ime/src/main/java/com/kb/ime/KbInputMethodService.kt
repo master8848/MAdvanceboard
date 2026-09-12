@@ -55,8 +55,11 @@ class KbInputMethodService : InputMethodService() {
     private var qwertyFallback by mutableStateOf(false)
     /**
      * Active pad layout id (`t9-9` / `t9-12` / `t9-16`). Encoder flag only —
-     * plumbed to [suggestWithLayout]/[learnWithLayout]; persisted by
-     * `PadModeStore` (toggle commit) and reloaded in [onCreate].
+     * plumbed to [suggestWithLayout]/[learnWithLayout]. Resolved per
+     * keystroke-source tab via [LayoutStore] (per-cat override -> global
+     * default -> `t9-9`, plan/02); re-resolved in [onCreate],
+     * [onStartInputView] (catches Settings changes while alive) and
+     * [onCategoryChanged].
      */
     internal var activeLayoutId: String = DEFAULT_LAYOUT_ID
     /** Parsed spec for [activeLayoutId]; source of key roles/symbols. */
@@ -76,6 +79,9 @@ class KbInputMethodService : InputMethodService() {
 
     /** Live pad layout id; read by [ImeScreen]'s toggle, written by [setPadLayout]. */
     private var liveLayoutId by mutableStateOf(DEFAULT_LAYOUT_ID)
+
+    /** Live tab label for [ImeScreen]'s per-tab pad caption. */
+    private var liveTabLabel by mutableStateOf("words")
 
     // -- Plan 01 gesture state (all read by ImeScreen overlays). --
     private var gestureThresholds: GestureThresholds = GestureThresholds()
@@ -133,9 +139,11 @@ class KbInputMethodService : InputMethodService() {
     override fun onCreate() {
         super.onCreate()
         gestureLog = GestureLog(this, onError = { gestureError = it })
-        // Restore the user's persisted pad-size toggle before first inflate.
-        activeLayoutId = PadModeStore.load(this)
+        // Restore the user's persisted layout (per-tab resolve; the
+        // default tab is `words`) before first inflate.
+        activeLayoutId = LayoutStore.layoutForCat(this, activeAssetId)
         liveLayoutId = activeLayoutId
+        liveTabLabel = activeAssetId
         activeSpec = loadLayoutSpec(this, activeLayoutId)
         reloadGesturePrefs()
         flingsAllowedAT = AccessibilityGates.evaluate(this).flingsAllowed
@@ -193,7 +201,8 @@ class KbInputMethodService : InputMethodService() {
                     },
                     onCategoryChanged = { onCategoryChanged(it) },
                     activeLayoutId = liveLayoutId,
-                    onLayoutChanged = { setPadLayout(PadModeStore.save(this@KbInputMethodService, it)) },
+                    activeTabLabel = liveTabLabel,
+                    onLayoutChanged = { setTabLayout(it) },
                     symbolsOptions = symbolsOptions,
                     symbolsTitle = symbolsTitle,
                     onSymbolPick = { onSymbolPick(it) },
@@ -253,6 +262,10 @@ class KbInputMethodService : InputMethodService() {
         flingsAllowedAT = gate.flingsAllowed
         // Fresh input view: AT status is authoritative; stale errors clear.
         gestureError = if (!gate.flingsAllowed) gate.reason else null
+        // Pick up Settings → Layout changes (global or per-tab) made while
+        // the IME was alive: re-resolve for the current tab.
+        val resolved = LayoutStore.layoutForCat(this, activeAssetId)
+        if (resolved != activeLayoutId) setPadLayout(resolved)
     }
 
     override fun onFinishInput() {
@@ -448,7 +461,7 @@ class KbInputMethodService : InputMethodService() {
             "t9-12" -> "t9-16"
             else -> "t9-9"
         }
-        setPadLayout(next)
+        setTabLayout(next)
     }
 
     internal fun setPadLayout(layoutId: String) {
@@ -458,6 +471,17 @@ class KbInputMethodService : InputMethodService() {
         activeSpec = loadLayoutSpec(this, layoutId)
         seq.clear()
         (cachedInputView as? LinearLayout)?.let { refreshPad(it) }
+    }
+
+    /**
+     * Pad-size toggle target: persists [layoutId] as the per-tab override
+     * for the current tab ([LayoutStore.setCatLayout] throws loudly on
+     * unknown ids) and swaps the pad. The global default is owned by
+     * Settings → Layout; per-tab picks win over it (plan/02).
+     */
+    internal fun setTabLayout(layoutId: String) {
+        LayoutStore.setCatLayout(this, activeAssetId, layoutId)
+        setPadLayout(layoutId)
     }
 
     /**
@@ -833,6 +857,13 @@ class KbInputMethodService : InputMethodService() {
             "★personal" -> "personal"
             else -> tabLabel.lowercase()
         }
+        liveTabLabel = activeAssetId
+        // Engine re-resolves per active tab (plan/02): swap the pad when
+        // the tab's layout (override -> global -> t9-9) differs. Key
+        // labels re-encode from the new spec; the in-progress seq clears
+        // because codes belong to the previous pad.
+        val resolved = LayoutStore.layoutForCat(this, activeAssetId)
+        if (resolved != activeLayoutId) setPadLayout(resolved)
     }
 
     private fun makePad(): View = if (qwertyFallback) {

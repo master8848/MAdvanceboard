@@ -4,15 +4,19 @@
 //! (exact + 1-edit adjacent-key neighbor + prefix), scores them with
 //! the ranking formula, and returns the top-N.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::layout::{KeyMapping, DEFAULT_LAYOUT_ID};
+use crate::layout::{KeyMapping, LayoutRegistry, DEFAULT_LAYOUT_ID};
 use crate::mapping::{encode_word, is_one_edit_neighbor};
 use crate::pack::PackFile;
 use crate::personal::{now_quantized, PersonalDict};
 use crate::rank::{score_candidate, RankInput, RankWeights};
+
+/// Layout ids with precomputed sequences (all current built-ins).
+pub const PRECOMPUTED_LAYOUTS: &[&str] = &["t9-9", "t9-12", "t9-16"];
 
 /// Static dictionary row (base or extension pack).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -27,6 +31,330 @@ pub struct DictEntry {
     /// per-layout matching keeps it verbatim instead of re-encoding.
     #[serde(default)]
     pub explicit: bool,
+    /// Roman transliteration source (Nepali pack, plan/03): sequence
+    /// computation uses `tr` instead of `word`, so Roman keystrokes
+    /// match while display stays Devanagari. `None` for all other packs.
+    #[serde(default)]
+    pub tr: Option<String>,
+    /// Roman spelling-variant sources (e.g. `"paani"` next to `tr:
+    /// "pani"`): each encodes to an extra match-any seq.
+    #[serde(default)]
+    pub alt: Vec<String>,
+    /// Variant seqs under the canonical `t9-9` code set, primary `seq`
+    /// excluded. Serves `t9-9` and `t9-12` (their 1-9 symbols are
+    /// identical, so latin/Devanagari encodings agree; locked by
+    /// `t9_12_shares_t99_aliases`).
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// Variant seqs under `t9-16` (finer pq/rs + wx/yz splits).
+    #[serde(default)]
+    pub aliases_t916: Vec<String>,
+    /// Pack-declared layout affinity (`PackFile.layout`): seeds the
+    /// category default via [`DictionaryStack::pack_layout_hint`]; never
+    /// filters matches (words stay findable under every layout).
+    #[serde(default)]
+    pub layout_id: Option<String>,
+    /// Precomputed `t9-12` sequence (insert-time; `seq` is canonical
+    /// `t9-9`). Empty only for explicit entries (verbatim `seq`) or rows
+    /// built before precompute landed (repaired by `ensure_precomputed`).
+    #[serde(default)]
+    pub seq_t912: String,
+    /// Precomputed `t9-16` sequence (same contract as `seq_t912`).
+    #[serde(default)]
+    pub seq_t916: String,
+}
+
+impl DictEntry {
+    /// Sequence source: the Roman transliteration when the pack
+    /// provides one (plan/03 tr-model), else the display word itself.
+    pub fn seq_source(&self) -> &str {
+        self.tr.as_deref().unwrap_or(&self.word)
+    }
+
+    /// Build a row from pack parts. Primary seq precedence: explicit
+    /// `seq` verbatim, else `encode(tr)`, else `encode(word)`
+    /// (plan/03 `PackWord.tr` first-class). Returns `None` when the
+    /// primary seq is empty (caller skips the row; see
+    /// [`crate::pack::PackFile::validate`] for loud diagnostics).
+    /// Aliases (match-any with the primary): encoded `alt` variants
+    /// plus — when a `tr` primary exists — the distinct `encode(word)`
+    /// consonant-skeleton fallback for direct-Devanagari digits.
+    pub fn from_parts(
+        word: String,
+        seq: Option<String>,
+        tr: Option<String>,
+        alt: Vec<String>,
+        freq: u64,
+        cat: String,
+        lang: String,
+        priority: i32,
+    ) -> Option<Self> {
+        let reg = LayoutRegistry::builtins_cached();
+        let t99 = reg.get_or_default("t9-9");
+        if let Some(s) = seq {
+            if s.is_empty() {
+                return None;
+            }
+            let mut e = Self {
+                word,
+                seq: s,
+                freq,
+                cat,
+                lang,
+                priority,
+                explicit: true,
+                layout_id: None,
+                tr,
+                alt,
+                seq_t912: String::new(),
+                seq_t916: String::new(),
+                aliases: Vec::new(),
+                aliases_t916: Vec::new(),
+            };
+            e.fill_aliases();
+            return Some(e);
+        }
+        let source = tr.as_deref().unwrap_or(&word);
+        let primary = t99.encode_word(source);
+        if primary.is_empty() {
+            return None;
+        }
+        let mut e = Self {
+            word,
+            seq: primary,
+            freq,
+            cat,
+            lang,
+            priority,
+            explicit: false,
+            layout_id: None,
+            tr,
+            alt,
+            seq_t912: String::new(),
+            seq_t916: String::new(),
+            aliases: Vec::new(),
+            aliases_t916: Vec::new(),
+        };
+        e.ensure_precomputed();
+        e.fill_aliases();
+        Some(e)
+    }
+
+    /// (Re)derive alias seqs from `alt` variants + the `encode(word)`
+    /// skeleton fallback. Idempotent: clears and rebuilds, so legacy
+    /// rows deserialized without aliases repair on insert.
+    fn fill_aliases(&mut self) {
+        self.aliases.clear();
+        self.aliases_t916.clear();
+        let reg = LayoutRegistry::builtins_cached();
+        let t99 = reg.get_or_default("t9-9");
+        let t916 = reg.get_or_default("t9-16");
+        let mut push = |seq: String, seq16: String| {
+            if !seq.is_empty() && seq != self.seq && !self.aliases.contains(&seq) {
+                self.aliases.push(seq);
+            }
+            // t9-16 evaluated independently: a variant can coincide with
+            // the primary under t9-9 yet split under t9-16 (pq/rs, wx/yz).
+            if !seq16.is_empty() && seq16 != self.seq_t916 && !self.aliases_t916.contains(&seq16)
+            {
+                self.aliases_t916.push(seq16);
+            }
+        };
+        for a in self.alt.clone() {
+            push(t99.encode_word(&a), t916.encode_word(&a));
+        }
+        // Direct-Devanagari fallback: when Roman `tr` is primary, the
+        // consonant skeleton stays findable too (plan/03, fallback only).
+        if self.tr.is_some() {
+            push(t99.encode_word(&self.word), t916.encode_word(&self.word));
+        }
+    }
+    /// Build a row, precomputing all per-layout sequences up front so
+    /// per-keystroke matching borrows instead of calling `encode_word`
+    /// per entry (~15k `String` allocs per keystroke at 15k words).
+    pub fn precomputed(
+        word: String,
+        freq: u64,
+        cat: String,
+        lang: String,
+        priority: i32,
+    ) -> Option<Self> {
+        let reg = LayoutRegistry::builtins_cached();
+        let seq = reg.get_or_default("t9-9").encode_word(&word);
+        if seq.is_empty() {
+            return None;
+        }
+        let mut e = Self {
+            word,
+            seq,
+            freq,
+            cat,
+            lang,
+            priority,
+            explicit: false,
+            layout_id: None,
+            tr: None,
+            alt: Vec::new(),
+            seq_t912: String::new(),
+            seq_t916: String::new(),
+            aliases: Vec::new(),
+            aliases_t916: Vec::new(),
+        };
+        e.ensure_precomputed();
+        Some(e)
+    }
+
+    /// Build a row with an explicit verbatim sequence (emoji/math packs):
+    /// the override holds under every layout.
+    pub fn explicit(
+        word: String,
+        seq: String,
+        freq: u64,
+        cat: String,
+        lang: String,
+        priority: i32,
+    ) -> Option<Self> {
+        if seq.is_empty() {
+            return None;
+        }
+        Some(Self {
+            word,
+            seq,
+            freq,
+            cat,
+            lang,
+            priority,
+            explicit: true,
+            layout_id: None,
+            tr: None,
+            alt: Vec::new(),
+            seq_t912: String::new(),
+            seq_t916: String::new(),
+            aliases: Vec::new(),
+            aliases_t916: Vec::new(),
+        })
+    }
+
+    /// Fill empty precomputed seqs (legacy rows). Non-explicit rows
+    /// re-encode the sequence source (`tr` when present, else `word`)
+    /// under each pad with a reused buffer; rows that genuinely
+    /// do not encode under a pad keep the canonical `seq` at match time
+    /// (same fallback the old per-keystroke `encode_word` path used).
+    pub fn ensure_precomputed(&mut self) {
+        if self.explicit {
+            return;
+        }
+        let reg = LayoutRegistry::builtins_cached();
+        let mut buf = String::new();
+        if self.seq_t912.is_empty() {
+            reg.get_or_default("t9-12")
+                .encode_word_into(self.seq_source(), &mut buf);
+            if !buf.is_empty() {
+                self.seq_t912 = buf.clone();
+            }
+        }
+        if self.seq_t916.is_empty() {
+            reg.get_or_default("t9-16")
+                .encode_word_into(self.seq_source(), &mut buf);
+            if !buf.is_empty() {
+                self.seq_t916 = buf.clone();
+            }
+        }
+    }
+
+    /// Fill the precomputed seq for one layout only, reusing the
+    /// caller's buffer (OOV hot path: one buffer serves the whole loop).
+    /// Unknown layouts and explicit entries are no-ops.
+    pub fn precompute_for(&mut self, layout_id: &str, buf: &mut String) {
+        if self.explicit {
+            return;
+        }
+        let reg = LayoutRegistry::builtins_cached();
+        match layout_id {
+            "t9-12" if self.seq_t912.is_empty() => {
+                reg.get_or_default("t9-12")
+                    .encode_word_into(self.seq_source(), buf);
+                if !buf.is_empty() {
+                    self.seq_t912 = buf.clone();
+                }
+            }
+            "t9-16" if self.seq_t916.is_empty() => {
+                reg.get_or_default("t9-16")
+                    .encode_word_into(self.seq_source(), buf);
+                if !buf.is_empty() {
+                    self.seq_t916 = buf.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+    /// Borrowed match sequence for `layout_id`: explicit overrides stay
+    /// verbatim; built-ins use the precomputed seq (zero alloc); unknown
+    /// or genuinely-unencodable cases fall back to canonical `seq`.
+    pub fn seq_for_layout(&self, layout_id: &str) -> &str {
+        if self.explicit {
+            return &self.seq;
+        }
+        match layout_id {
+            "t9-12" if !self.seq_t912.is_empty() => &self.seq_t912,
+            "t9-16" if !self.seq_t916.is_empty() => &self.seq_t916,
+            _ => &self.seq,
+        }
+    }
+
+    /// Borrowed variant seqs for `layout_id` (match-any with
+    /// [`Self::seq_for_layout`]). `t9-9`/`t9-12` share `aliases`;
+    /// `t9-16` has its own splits. Unknown layouts report none here —
+    /// the on-the-fly custom path derives its own variants instead.
+    pub fn aliases_for_layout(&self, layout_id: &str) -> &[String] {
+        match layout_id {
+            "t9-16" => &self.aliases_t916,
+            "t9-9" | "t9-12" => &self.aliases,
+            _ => &[],
+        }
+    }
+
+    /// Canonical match seqs, primary first (frozen `t9-9` path).
+    pub fn all_seqs(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.seq.as_str()).chain(self.aliases.iter().map(String::as_str))
+    }
+
+    /// On-the-fly `(primary, aliases)` under a custom (non-precomputed)
+    /// mapping. Explicit seqs stay verbatim; otherwise the Roman sources
+    /// (`tr`, `alt`) plus the `encode(word)` skeleton fallback are
+    /// re-encoded under `mapping`, with the canonical seq as the empty
+    /// fallback — the same rule the precomputed paths bake in at insert.
+    pub fn custom_seqs(&self, mapping: &dyn KeyMapping) -> (String, Vec<String>) {
+        if self.explicit {
+            let aliases: Vec<String> = self
+                .alt
+                .iter()
+                .map(|a| mapping.encode_word(a))
+                .filter(|s| !s.is_empty() && *s != self.seq)
+                .collect();
+            return (self.seq.clone(), aliases);
+        }
+        let primary = mapping.encode_word(self.seq_source());
+        let primary = if primary.is_empty() {
+            self.seq.clone()
+        } else {
+            primary
+        };
+        let mut aliases = Vec::new();
+        for a in &self.alt {
+            let s = mapping.encode_word(a);
+            if !s.is_empty() && s != primary && !aliases.contains(&s) {
+                aliases.push(s);
+            }
+        }
+        if self.tr.is_some() {
+            let s = mapping.encode_word(&self.word);
+            if !s.is_empty() && s != primary && !aliases.contains(&s) {
+                aliases.push(s);
+            }
+        }
+        (primary, aliases)
+    }
 }
 
 /// Scored candidate returned to the UI / UniFFI.
@@ -46,8 +374,14 @@ pub struct DictionaryStack {
     extensions: Vec<DictEntry>,
     pub personal: PersonalDict,
     weights: RankWeights,
-    /// FST index over all known sequences (exact + prefix search).
-    fst_index: Option<fst::Set<Vec<u8>>>,
+    /// Per-layout FST indexes over known sequences (exact + prefix
+    /// search). Built from the precomputed per-layout seqs at insert
+    /// time; every layout present in [`PRECOMPUTED_LAYOUTS`] gets one.
+    fst_by_layout: HashMap<String, fst::Set<Vec<u8>>>,
+    /// FST build failures by layout (insert sets are sorted+deduped so
+    /// this is only populated on genuine `fst` errors; surfaced via
+    /// [`Self::fst_build_error`] instead of a silent missing index).
+    fst_errors: HashMap<String, String>,
 }
 
 impl DictionaryStack {
@@ -57,8 +391,10 @@ impl DictionaryStack {
             extensions: Vec::new(),
             personal: PersonalDict::new(),
             weights: RankWeights::default(),
-            fst_index: None,
+            fst_by_layout: HashMap::new(),
+            fst_errors: HashMap::new(),
         };
+        s.ensure_precomputed_all();
         s.rebuild_index();
         s
     }
@@ -69,27 +405,74 @@ impl DictionaryStack {
             extensions: Vec::new(),
             personal: PersonalDict::new(),
             weights,
-            fst_index: None,
+            fst_by_layout: HashMap::new(),
+            fst_errors: HashMap::new(),
         };
+        s.ensure_precomputed_all();
         s.rebuild_index();
         s
+    }
+
+    /// Repair legacy rows missing precomputed seqs (see
+    /// [`DictEntry::ensure_precomputed`]).
+    fn ensure_precomputed_all(&mut self) {
+        for e in self.base.iter_mut().chain(self.extensions.iter_mut()) {
+            e.ensure_precomputed();
+        }
     }
 
     /// Push an extension pack's entries at the given priority
     /// (higher wins on display category).
     pub fn add_pack(&mut self, pack: &PackFile, priority: i32) {
-        self.extensions.extend(pack.to_entries(priority));
-        self.rebuild_index();
-    }
-
-    pub fn add_entries(&mut self, entries: Vec<DictEntry>) {
+        let mut entries = pack.to_entries(priority);
+        for e in entries.iter_mut() {
+            e.ensure_precomputed();
+        }
         self.extensions.extend(entries);
         self.rebuild_index();
     }
 
+    pub fn add_entries(&mut self, entries: Vec<DictEntry>) {
+        let mut entries = entries;
+        for e in entries.iter_mut() {
+            e.ensure_precomputed();
+        }
+        self.extensions.extend(entries);
+        self.rebuild_index();
+    }
+
+    /// Pack-declared layout affinity for `cat`: the `layout_id` of the
+    /// highest-priority entry carrying one (ties: smallest layout id,
+    /// then smallest word — fully deterministic). Used to seed the
+    /// category default when the user has no explicit override; never
+    /// filters matches. `None` when no entry declares an affinity.
+    pub fn pack_layout_hint(&self, cat: &str) -> Option<String> {
+        // Normative total order: max priority, then smallest layout id,
+        // then smallest word (HashMap-free iteration, Vec order is
+        // insertion order, sort makes the pick deterministic).
+        let mut hints: Vec<(&str, i32, &str)> = Vec::new();
+        for e in self.base.iter().chain(self.extensions.iter()) {
+            if let Some(hint) = e.layout_id.as_deref() {
+                if e.cat == cat && !hint.is_empty() {
+                    hints.push((hint, e.priority, e.word.as_str()));
+                }
+            }
+        }
+        hints.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.0.cmp(b.0))
+                .then_with(|| a.2.cmp(b.2))
+        });
+        hints.first().map(|h| h.0.to_string())
+    }
+
     /// Load base entries from a JSON wordlist. Accepts either an array
-    /// of `{w|word, freq?, cat?, lang?}` objects or an array of plain
-    /// strings (freq 100, cat `"EN"`, lang `"en"`).
+    /// of `{w|word, freq?, cat?, lang?, seq?, tr?, alt?}` objects or an
+    /// array of plain strings (freq 100, cat `"EN"`, lang `"en"`).
+    /// `seq` is verbatim, else `encode(tr)`, else `encode(w)`
+    /// (see [`DictEntry::from_parts`]). Per-layout seqs are precomputed
+    /// at insert. Objects whose primary seq is empty are skipped;
+    /// malformed shapes are a hard `Err` (never silent).
     pub fn load_base_json(json: &str) -> Result<Vec<DictEntry>, String> {
         let v: serde_json::Value =
             serde_json::from_str(json).map_err(|e| e.to_string())?;
@@ -97,46 +480,50 @@ impl DictionaryStack {
         let mut out = Vec::with_capacity(arr.len());
         for item in arr {
             if let Some(w) = item.as_str() {
-                let seq = encode_word(w);
-                if seq.is_empty() {
-                    continue;
+                if let Some(e) =
+                    DictEntry::precomputed(w.to_string(), 100, "EN".to_string(), "en".to_string(), 0)
+                {
+                    out.push(e);
                 }
-                out.push(DictEntry {
-                    word: w.to_string(),
-                    seq,
-                    freq: 100,
-                    cat: "EN".to_string(),
-                    lang: "en".to_string(),
-                    priority: 0,
-                    explicit: false,
-                });
             } else if let Some(o) = item.as_object() {
                 let w = o
                     .get("w")
                     .or_else(|| o.get("word"))
                     .and_then(|x| x.as_str())
                     .ok_or_else(|| "word object missing \"w\"".to_string())?;
-                let seq = encode_word(w);
-                if seq.is_empty() {
-                    continue;
-                }
-                out.push(DictEntry {
-                    word: w.to_string(),
-                    seq,
-                    freq: o.get("freq").and_then(|x| x.as_u64()).unwrap_or(100),
-                    cat: o
-                        .get("cat")
+                let alt = match o.get("alt") {
+                    None => Vec::new(),
+                    Some(v) => v
+                        .as_array()
+                        .ok_or_else(|| {
+                            format!("word object {w:?}: \"alt\" must be an array of strings")
+                        })?
+                        .iter()
+                        .map(|x| {
+                            x.as_str().map(str::to_string).ok_or_else(|| {
+                                format!("word object {w:?}: \"alt\" entries must be strings")
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                };
+                if let Some(e) = DictEntry::from_parts(
+                    w.to_string(),
+                    o.get("seq").and_then(|x| x.as_str()).map(str::to_string),
+                    o.get("tr").and_then(|x| x.as_str()).map(str::to_string),
+                    alt,
+                    o.get("freq").and_then(|x| x.as_u64()).unwrap_or(100),
+                    o.get("cat")
                         .and_then(|x| x.as_str())
                         .unwrap_or("EN")
                         .to_string(),
-                    lang: o
-                        .get("lang")
+                    o.get("lang")
                         .and_then(|x| x.as_str())
                         .unwrap_or("en")
                         .to_string(),
-                    priority: 0,
-                    explicit: false,
-                });
+                    0,
+                ) {
+                    out.push(e);
+                }
             } else {
                 return Err("wordlist items must be strings or objects".to_string());
             }
@@ -144,32 +531,66 @@ impl DictionaryStack {
         Ok(out)
     }
 
-    /// Rebuild the FST sequence index (keys must be inserted sorted).
+    /// Rebuild the per-layout FST sequence indexes (keys inserted sorted).
+    /// Indexes cover primary seqs plus match-any aliases, so variant
+    /// spellings and the Devanagari skeleton fallback decode too.
     fn rebuild_index(&mut self) {
-        let mut seqs: Vec<String> = self
-            .base
-            .iter()
-            .chain(self.extensions.iter())
-            .map(|e| e.seq.clone())
-            .collect();
-        seqs.sort();
-        seqs.dedup();
-        let mut builder = fst::SetBuilder::memory();
-        for s in &seqs {
-            if builder.insert(s).is_err() {
-                self.fst_index = None;
-                return;
+        self.fst_by_layout.clear();
+        self.fst_errors.clear();
+        for layout in PRECOMPUTED_LAYOUTS {
+            let mut seqs: Vec<&str> = self
+                .base
+                .iter()
+                .chain(self.extensions.iter())
+                .flat_map(|e| {
+                    std::iter::once(e.seq_for_layout(layout))
+                        .chain(e.aliases_for_layout(layout).iter().map(String::as_str))
+                })
+                .filter(|s| !s.is_empty())
+                .collect();
+            seqs.sort();
+            seqs.dedup();
+            let mut builder = fst::SetBuilder::memory();
+            let mut failed: Option<String> = None;
+            for s in &seqs {
+                if let Err(e) = builder.insert(s) {
+                    failed = Some(format!("DictionaryStack::rebuild_index: fst insert for layout {layout:?} failed: {e}"));
+                    break;
+                }
             }
-        }
-        match builder.into_inner() {
-            Ok(bytes) => self.fst_index = fst::Set::new(bytes).ok(),
-            Err(_) => self.fst_index = None,
+            if let Some(err) = failed {
+                self.fst_errors.insert((*layout).to_string(), err);
+                continue;
+            }
+            match builder.into_inner() {
+                Ok(bytes) => match fst::Set::new(bytes) {
+                    Ok(set) => {
+                        self.fst_by_layout.insert((*layout).to_string(), set);
+                    }
+                    Err(e) => {
+                        self.fst_errors.insert(
+                            (*layout).to_string(),
+                            format!("DictionaryStack::rebuild_index: fst load for layout {layout:?} failed: {e}"),
+                        );
+                    }
+                },
+                Err(e) => {
+                    self.fst_errors.insert(
+                        (*layout).to_string(),
+                        format!("DictionaryStack::rebuild_index: fst finish for layout {layout:?} failed: {e}"),
+                    );
+                }
+            }
         }
     }
 
-    /// FST-backed prefix search: known sequences starting with `prefix`.
+    /// FST-backed prefix search under the canonical `t9-9` index.
     pub fn decode_prefix(&self, prefix: &str, limit: usize) -> Vec<String> {
-        let Some(set) = &self.fst_index else {
+        self.decode_prefix_for_id(prefix, "t9-9", limit)
+    }
+
+    fn decode_prefix_for_id(&self, prefix: &str, layout_id: &str, limit: usize) -> Vec<String> {
+        let Some(set) = self.fst_by_layout.get(layout_id) else {
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -188,13 +609,25 @@ impl DictionaryStack {
         out
     }
 
+    /// Number of sequences in the canonical `t9-9` index.
     pub fn fst_len(&self) -> usize {
-        self.fst_index.as_ref().map(|s| s.len()).unwrap_or(0)
+        self.fst_len_for("t9-9")
+    }
+
+    /// Number of sequences in the index for `layout_id` (0 when the
+    /// layout has no index).
+    pub fn fst_len_for(&self, layout_id: &str) -> usize {
+        self.fst_by_layout.get(layout_id).map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// FST build failure for `layout_id`, if any (explicit surface for
+    /// what used to be a silent missing index).
+    pub fn fst_build_error(&self, layout_id: &str) -> Option<&str> {
+        self.fst_errors.get(layout_id).map(String::as_str)
     }
 
     /// Per-layout decode: the prefix must consist of the layout's codes,
-    /// then the shared sequence index is scanned. (The index holds
-    /// canonical seqs; a future per-layout index can reuse this hook.)
+    /// then that layout's own sequence index is scanned.
     pub fn decode_prefix_for_layout(
         &self,
         prefix: &str,
@@ -204,7 +637,10 @@ impl DictionaryStack {
         if !prefix.chars().all(|c| mapping.contains_code(c)) {
             return Vec::new();
         }
-        self.decode_prefix(prefix, limit)
+        // Custom (non-precomputed) layouts have no dedicated index; their
+        // code set still gates the query, but there is no index to scan,
+        // so the result is empty rather than a wrong-layout scan.
+        self.decode_prefix_for_id(prefix, mapping.layout_id(), limit)
     }
 
     fn cat_boost(&self, entry_cat: &str, in_personal: bool, active_tab: &str) -> f64 {
@@ -245,14 +681,20 @@ impl DictionaryStack {
         limit: usize,
         now: i64,
     ) -> Vec<Suggestion> {
-        // Frozen t9-9 path: stored seqs, global neighbor graph, digits only.
+        // Frozen t9-9 path: precomputed canonical seqs, global neighbor
+        // graph, digits only.
         self.suggest_inner(
             ctx,
             digits,
             active_tab,
             limit,
             DEFAULT_LAYOUT_ID,
-            &|e| e.seq.clone(),
+            &|e| {
+                (
+                    Cow::Borrowed(e.seq_for_layout(DEFAULT_LAYOUT_ID)),
+                    Cow::Borrowed(e.aliases_for_layout(DEFAULT_LAYOUT_ID)),
+                )
+            },
             &is_one_edit_neighbor,
             &|c| c.is_ascii_digit(),
             now,
@@ -286,7 +728,12 @@ impl DictionaryStack {
             active_tab,
             limit,
             DEFAULT_LAYOUT_ID,
-            &|e| e.seq.clone(),
+            &|e| {
+                (
+                    Cow::Borrowed(e.seq_for_layout(DEFAULT_LAYOUT_ID)),
+                    Cow::Borrowed(e.aliases_for_layout(DEFAULT_LAYOUT_ID)),
+                )
+            },
             &|_, _| false,
             &|c| c.is_ascii_digit(),
             now,
@@ -318,27 +765,44 @@ impl DictionaryStack {
         limit: usize,
         now: i64,
     ) -> Vec<Suggestion> {
-        self.suggest_inner(
-            ctx,
-            digits,
-            active_tab,
-            limit,
-            mapping.layout_id(),
-            &|e| {
-                if e.explicit {
-                    return e.seq.clone();
-                }
-                let s = mapping.encode_word(&e.word);
-                if s.is_empty() {
-                    e.seq.clone()
-                } else {
-                    s
-                }
-            },
-            &|a, b| mapping.is_one_edit_neighbor(a, b),
-            &|c| mapping.contains_code(c),
-            now,
-        )
+        // Built-in layouts borrow the insert-time precomputed seq (zero
+        // alloc per entry); explicit pack overrides stay verbatim; custom
+        // layouts encode on the fly with the same empty-falls-back-to-
+        // canonical rule the old closure used.
+        let layout_id = mapping.layout_id();
+        if PRECOMPUTED_LAYOUTS.contains(&layout_id) {
+            self.suggest_inner(
+                ctx,
+                digits,
+                active_tab,
+                limit,
+                layout_id,
+                &|e| {
+                    (
+                        Cow::Borrowed(e.seq_for_layout(layout_id)),
+                        Cow::Borrowed(e.aliases_for_layout(layout_id)),
+                    )
+                },
+                &|a, b| mapping.is_one_edit_neighbor(a, b),
+                &|c| mapping.contains_code(c),
+                now,
+            )
+        } else {
+            self.suggest_inner(
+                ctx,
+                digits,
+                active_tab,
+                limit,
+                layout_id,
+                &|e| {
+                    let (primary, aliases) = e.custom_seqs(mapping);
+                    (Cow::Owned(primary), Cow::Owned(aliases))
+                },
+                &|a, b| mapping.is_one_edit_neighbor(a, b),
+                &|c| mapping.contains_code(c),
+                now,
+            )
+        }
     }
 
     /// Per-layout neighbor-OFF deterministic entry point.
@@ -351,27 +815,40 @@ impl DictionaryStack {
         limit: usize,
         now: i64,
     ) -> Vec<Suggestion> {
-        self.suggest_inner(
-            ctx,
-            digits,
-            active_tab,
-            limit,
-            mapping.layout_id(),
-            &|e| {
-                if e.explicit {
-                    return e.seq.clone();
-                }
-                let s = mapping.encode_word(&e.word);
-                if s.is_empty() {
-                    e.seq.clone()
-                } else {
-                    s
-                }
-            },
-            &|_, _| false,
-            &|c| mapping.contains_code(c),
-            now,
-        )
+        let layout_id = mapping.layout_id();
+        if PRECOMPUTED_LAYOUTS.contains(&layout_id) {
+            self.suggest_inner(
+                ctx,
+                digits,
+                active_tab,
+                limit,
+                layout_id,
+                &|e| {
+                    (
+                        Cow::Borrowed(e.seq_for_layout(layout_id)),
+                        Cow::Borrowed(e.aliases_for_layout(layout_id)),
+                    )
+                },
+                &|_, _| false,
+                &|c| mapping.contains_code(c),
+                now,
+            )
+        } else {
+            self.suggest_inner(
+                ctx,
+                digits,
+                active_tab,
+                limit,
+                layout_id,
+                &|e| {
+                    let (primary, aliases) = e.custom_seqs(mapping);
+                    (Cow::Owned(primary), Cow::Owned(aliases))
+                },
+                &|_, _| false,
+                &|c| mapping.contains_code(c),
+                now,
+            )
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -382,7 +859,7 @@ impl DictionaryStack {
         active_tab: &str,
         limit: usize,
         layout_id: &str,
-        seq_of: &dyn Fn(&DictEntry) -> String,
+        seqs_of: &dyn Fn(&DictEntry) -> (Cow<'_, str>, Cow<'_, [String]>),
         is_neighbor_edit: &dyn Fn(&str, &str) -> bool,
         is_code: &dyn Fn(char) -> bool,
         now: i64,
@@ -403,6 +880,11 @@ impl DictionaryStack {
         }
 
         // Union across base + extensions, keyed by (norm word, lang).
+        // Each row matches match-any over its (primary, aliases) seqs;
+        // keyfit is the best across them. Alias ROWS (same word, distinct
+        // seqs in separate rows) merge into one candidate instead of
+        // collapsing to the first seq: frequencies sum, display follows
+        // the highest-priority row, keyfit takes the max.
         let mut merged: HashMap<String, Merged> = HashMap::new();
         let keyfit_of = |eseq: &str| -> Option<f64> {
             if eseq == digits {
@@ -415,12 +897,22 @@ impl DictionaryStack {
                 None
             }
         };
-        for e in self.base.iter().chain(self.extensions.iter()) {
-            let eseq = seq_of(e);
-            if eseq.is_empty() {
-                continue;
+        let keyfit_any = |primary: &str, aliases: &[String]| -> Option<f64> {
+            let mut best = if primary.is_empty() {
+                None
+            } else {
+                keyfit_of(primary)
+            };
+            for a in aliases {
+                if let Some(k) = keyfit_of(a) {
+                    best = Some(best.map_or(k, |m: f64| m.max(k)));
+                }
             }
-            let Some(keyfit) = keyfit_of(&eseq) else {
+            best
+        };
+        for e in self.base.iter().chain(self.extensions.iter()) {
+            let (primary, aliases) = seqs_of(e);
+            let Some(keyfit) = keyfit_any(&primary, &aliases) else {
                 continue;
             };
             let norm = format!("{}\x1f{}", e.word.to_lowercase(), e.lang);
@@ -441,7 +933,7 @@ impl DictionaryStack {
                         norm,
                         Merged {
                             word: e.word.clone(),
-                            seq: eseq,
+                            seq: primary.into_owned(),
                             freq_base: e.freq,
                             cat: e.cat.clone(),
                             lang: e.lang.clone(),
@@ -457,12 +949,15 @@ impl DictionaryStack {
         // OOV commits) participate through the same pipeline. Entries whose
         // (norm, lang) collides with a static candidate merge (keyfit max,
         // never a duplicate row); the personal overlay below still supplies
-        // freq_personal / recency / bigram.
+        // freq_personal / recency / bigram. Encoding reuses one buffer for
+        // the whole loop (no per-entry `String` alloc beyond the stored
+        // `word` clone on match).
+        let mut enc_buf = String::new();
         for p in self.personal.live_entries() {
             // Frozen t9-9 path reads `seq` verbatim, so pre-encode with the
-            // default T9 mapping; per-layout paths ignore `seq` for
-            // non-explicit entries and re-encode under their own mapping.
-            let tmp = DictEntry {
+            // default T9 mapping; per-layout paths use the precomputed seq
+            // for their own layout (filled below into the loop buffer).
+            let mut tmp = DictEntry {
                 word: p.word.clone(),
                 seq: encode_word(&p.word),
                 freq: 0,
@@ -470,12 +965,20 @@ impl DictionaryStack {
                 lang: p.lang.clone(),
                 priority: 100,
                 explicit: false,
+                layout_id: None,
+                tr: None,
+                alt: Vec::new(),
+                aliases: Vec::new(),
+                aliases_t916: Vec::new(),
+                seq_t912: String::new(),
+                seq_t916: String::new(),
             };
-            let eseq = seq_of(&tmp);
-            if eseq.is_empty() {
+            if tmp.seq.is_empty() && layout_id == DEFAULT_LAYOUT_ID {
                 continue;
             }
-            let Some(keyfit) = keyfit_of(&eseq) else {
+            tmp.precompute_for(layout_id, &mut enc_buf);
+            let (primary, aliases) = seqs_of(&tmp);
+            let Some(keyfit) = keyfit_any(&primary, &aliases) else {
                 continue;
             };
             let norm = format!("{}\x1f{}", p.word.to_lowercase(), p.lang);
@@ -490,7 +993,7 @@ impl DictionaryStack {
                         norm,
                         Merged {
                             word: p.word.clone(),
-                            seq: eseq,
+                            seq: primary.into_owned(),
                             freq_base: 0,
                             cat: if p.category.is_empty() {
                                 "personal".to_string()
@@ -778,5 +1281,215 @@ mod tests {
         // emoji it gets the full category boost.
         let s = stack.suggest("", "386", "emoji", 5);
         assert_eq!(s[0].cat, "emoji");
+    }
+
+    fn ne_stack() -> DictionaryStack {
+        // Minimal Nepali pack: Devanagari display + Roman tr.
+        let pack = load_pack_str(
+            r#"{"id":"ne","title":"Nepali","version":"1.0.0",
+                "words":[
+                    {"w":"नमस्ते","tr":"namaste","freq":9000,"cat":"NE","lang":"ne"},
+                    {"w":"नेपाल","tr":"nepal","freq":8500,"cat":"NE","lang":"ne"},
+                    {"w":"पानी","tr":"pani","alt":["paani"],"freq":7000,"cat":"NE","lang":"ne"},
+                    {"w":"काठमाडौं","tr":"kathmandu","freq":7000,"cat":"NE","lang":"ne"}]}"#,
+        )
+        .unwrap();
+        assert!(pack.validate().is_empty());
+        let mut stack = DictionaryStack::new(Vec::new());
+        stack.add_pack(&pack, 10);
+        stack
+    }
+
+    #[test]
+    fn roman_typing_surfaces_devanagari_words() {
+        // plan/03 acceptance: `k->2`-style Roman T9 finds Devanagari words.
+        let stack = ne_stack();
+        let s = stack.suggest("", &encode_word("namaste"), "NE", 5);
+        assert!(
+            s.iter().any(|c| c.word == "नमस्ते"),
+            "roman full-seq must surface नमस्ते, got {:?}",
+            s.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+        // Prefix-4 (top-3@4 shape): नमस्ते's tr prefix must be present.
+        let pre4 = &encode_word("namaste")[..4];
+        let s4 = stack.suggest("", pre4, "NE", 3);
+        assert!(
+            s4.iter().any(|c| c.word == "नमस्ते"),
+            "roman prefix-4 {pre4} must surface नमस्ते in top-3, got {:?}",
+            s4.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn skeleton_fallback_still_matches() {
+        // Direct-Devanagari digits hit the skeleton alias (fallback only).
+        let stack = ne_stack();
+        let s = stack.suggest("", &encode_word("नमस्ते"), "NE", 5);
+        assert!(
+            s.iter().any(|c| c.word == "नमस्ते"),
+            "skeleton digits must still match नमस्ते, got {:?}",
+            s.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn alt_variant_spelling_matches() {
+        // `paani` (double-a) finds पानी whose primary tr is `pani`.
+        let stack = ne_stack();
+        let s = stack.suggest("", &encode_word("paani"), "NE", 5);
+        assert!(
+            s.iter().any(|c| c.word == "पानी"),
+            "variant paani must surface पानी, got {:?}",
+            s.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+        // ... while the primary spelling keeps working.
+        let s2 = stack.suggest("", &encode_word("pani"), "NE", 5);
+        assert!(s2.iter().any(|c| c.word == "पानी"));
+        // No duplicate rows for one word.
+        assert_eq!(s.iter().filter(|c| c.word == "पानी").count(), 1);
+    }
+
+    #[test]
+    fn alias_rows_merge_never_duplicate() {
+        // Same word in two rows with distinct explicit seqs (the alias-row
+        // encoding): both seqs retrieve it, merged into a single row.
+        let mut stack = DictionaryStack::new(Vec::new());
+        let mk = |seq: &str| {
+            DictEntry::from_parts(
+                "पानी".to_string(),
+                Some(seq.to_string()),
+                None,
+                Vec::new(),
+                100,
+                "NE".to_string(),
+                "ne".to_string(),
+                0,
+            )
+            .unwrap()
+        };
+        stack.add_entries(vec![mk("7264"), mk("72264")]);
+        for digits in ["7264", "72264"] {
+            let s = stack.suggest("", digits, "NE", 5);
+            assert_eq!(
+                s.iter().filter(|c| c.word == "पानी").count(),
+                1,
+                "digits {digits} must yield exactly one पानी row"
+            );
+        }
+    }
+
+    #[test]
+    fn t9_12_shares_t99_aliases() {
+        // Locks the `aliases` sharing assumption: t9-9 and t9-12 encode
+        // latin + Devanagari identically (only the bottom control row
+        // differs, and it never emits text codes).
+        let r = LayoutRegistry::with_builtins();
+        let t9 = r.get_or_default("t9-9");
+        let t12 = r.get_or_default("t9-12");
+        for w in [
+            "namaste",
+            "kathmandu",
+            "paani",
+            "pani",
+            "sathi",
+            "wxyz",
+            "नमस्ते",
+            "काठमाडौं",
+            "पानी",
+            "कि",
+            "कमल",
+            "hello",
+        ] {
+            assert_eq!(t9.encode_word(w), t12.encode_word(w), "word {w:?}");
+        }
+    }
+
+    #[test]
+    fn tr_primary_holds_under_t9_16() {
+        // t9-16 splits pq/rs + wx/yz: the tr primary must be re-encoded
+        // for that pad (precomputed), not frozen to the t9-9 seq.
+        let r = LayoutRegistry::with_builtins();
+        let t16 = r.get_or_default("t9-16");
+        // "sathi": s->rs-split, matched under t9-16's own codes.
+        let pack = load_pack_str(
+            r#"{"id":"ne","title":"Nepali","version":"1.0.0",
+                "words":[{"w":"साथी","tr":"sathi","freq":6500,"cat":"NE","lang":"ne"}]}"#,
+        )
+        .unwrap();
+        let mut st = DictionaryStack::new(Vec::new());
+        st.add_pack(&pack, 10);
+        let digits = t16.encode_word("sathi");
+        assert_ne!(digits, encode_word("sathi"), "t16 must split s/p codes here");
+        let s = st.suggest_for_layout("", &digits, t16, "NE", 5);
+        assert!(
+            s.iter().any(|c| c.word == "साथी"),
+            "t9-16 roman digits {digits} must surface साथी, got {:?}",
+            s.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn layout02_precomputed_golden_vectors() {
+        // Acceptance vectors (plan/02): hello identical on t9-9/t9-12,
+        // fun splits 386 vs 396, pqrs is t9-16-only 7788.
+        let entries = DictionaryStack::load_base_json(
+            r#"[{"w":"hello","freq":900,"cat":"EN"},
+                {"w":"fun","freq":150,"cat":"EN"},
+                {"w":"pqrs","freq":50,"cat":"EN"}]"#,
+        )
+        .unwrap();
+        let hello = entries.iter().find(|e| e.word == "hello").unwrap();
+        assert_eq!(hello.seq, "43556");
+        assert_eq!(hello.seq_for_layout("t9-12"), "43556");
+        let fun = entries.iter().find(|e| e.word == "fun").unwrap();
+        assert_eq!(fun.seq, "386");
+        assert_eq!(fun.seq_for_layout("t9-12"), "386");
+        assert_eq!(fun.seq_for_layout("t9-16"), "396");
+        let pqrs = entries.iter().find(|e| e.word == "pqrs").unwrap();
+        assert_eq!(pqrs.seq_for_layout("t9-16"), "7788");
+    }
+
+    #[test]
+    fn layout02_per_layout_fst_and_suggest() {
+        let stack = DictionaryStack::new(
+            DictionaryStack::load_base_json(
+                r#"[{"w":"hello","freq":900,"cat":"EN"},
+                    {"w":"fun","freq":150,"cat":"EN"}]"#,
+            )
+            .unwrap(),
+        );
+        // Every built-in layout owns an index; no silent build errors.
+        for id in ["t9-9", "t9-12", "t9-16"] {
+            assert!(stack.fst_len_for(id) >= 2, "index {id}");
+            assert!(stack.fst_build_error(id).is_none(), "index {id}");
+        }
+        // t9-16 index holds the split seq, t9-9 does not.
+        assert!(stack.decode_prefix("39", 10).is_empty());
+        let r = LayoutRegistry::with_builtins();
+        let t16 = r.get_or_default("t9-16");
+        let s = stack.suggest_for_layout("", "396", t16, "EN", 5);
+        assert!(s.iter().any(|c| c.word == "fun"));
+        assert_eq!(s.iter().find(|c| c.word == "fun").unwrap().seq, "396");
+        assert_eq!(s[0].layout_id, "t9-16");
+        // Same word under t9-9 keeps its own seq (deterministic per
+        // layout, not a shared label).
+        let t9 = r.get_or_default("t9-9");
+        let s9 = stack.suggest_for_layout("", "386", t9, "EN", 5);
+        assert_eq!(s9.iter().find(|c| c.word == "fun").unwrap().seq, "386");
+    }
+
+    #[test]
+    fn layout02_pack_layout_hint_seeds_ne() {
+        let mut stack = DictionaryStack::new(Vec::new());
+        assert_eq!(stack.pack_layout_hint("NE"), None);
+        let pack = load_pack_str(
+            r#"{"id":"ne","title":"Nepali","version":"1.0.0","layout":"t9-16",
+                "words":[{"w":"साथी","tr":"sathi","freq":6500,"cat":"NE","lang":"ne"}]}"#,
+        )
+        .unwrap();
+        assert!(pack.validate().is_empty());
+        stack.add_pack(&pack, 10);
+        assert_eq!(stack.pack_layout_hint("NE"), Some("t9-16".to_string()));
+        assert_eq!(stack.pack_layout_hint("EN"), None);
     }
 }

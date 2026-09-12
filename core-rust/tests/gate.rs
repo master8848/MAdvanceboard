@@ -8,7 +8,9 @@
 //! - `FROZEN_NOW` = quantized `1726000000` (1h bucket, deterministic).
 //! - `RankWeights::default()`, limit 30, `ctx=""` (learning arm `"the"`).
 //! - Corpus: `packs/words_en.json` (EN base) + `packs/nepali.json` (NE,
-//!   Devanagari words) + `packs/code_js.json` + `packs/medical.json`
+//!   Devanagari display + Roman `tr` seqs: gate digits are `encode(tr)`,
+//!   mirroring the loader, so NE measures Roman typing) +
+//!   `packs/code_js.json` + `packs/medical.json`
 //!   (distractors), embedded via `include_str!` so a missing corpus is a
 //!   compile-time error; an empty pack is an explicit test failure.
 //!
@@ -97,10 +99,16 @@ fn load_corpus() -> (DictionaryStack, Vec<CorpusWord>, Vec<CorpusWord>) {
             Some(s) => s.add_entries(entries),
         }
         for w in &pack.words {
-            let seq = w
-                .seq
-                .clone()
-                .unwrap_or_else(|| encode_word(&w.w));
+            // Mirror PackFile::to_entries precedence: seq > encode(tr) >
+            // encode(w). NE rows query Roman prefixes (actual user
+            // behavior); the loader guarantees the identical seq, so gate
+            // digits match engine digits (plan/03 scheduled fix: the old
+            // encode(w)-only seqs measured Devanagari digits nobody types).
+            let seq = w.seq.clone().unwrap_or_else(|| {
+                w.tr.as_ref()
+                    .map(|tr| encode_word(tr))
+                    .unwrap_or_else(|| encode_word(&w.w))
+            });
             if seq.is_empty() {
                 continue;
             }
