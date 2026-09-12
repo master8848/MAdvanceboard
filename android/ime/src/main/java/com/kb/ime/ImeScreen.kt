@@ -182,7 +182,7 @@ fun ImeScreen(
         }
         if (expanded) {
             ExpandAllList(
-                items = candidates.take(30),
+                items = candidates.take(EXPAND_LIMIT),
                 onPick = {
                     expanded = false
                     onCandidatePicked(it)

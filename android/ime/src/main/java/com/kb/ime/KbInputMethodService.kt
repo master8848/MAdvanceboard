@@ -16,6 +16,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.ComposeView
 import com.kb.bridge.KbCore
 import com.kb.bridge.Predictor
+import com.kb.bridge.PredictorFactory
 import com.kb.bridge.StubPredictor
 import com.kb.plugin.CategoryRegistry
 import kotlinx.coroutines.CoroutineScope
@@ -130,11 +131,26 @@ class KbInputMethodService : InputMethodService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /**
-     * [StubPredictor] keeps the IME functional when `libkbcore.so` is missing
-     * ([KbCore.isAvailable] == false). The real UniFFI predictor plugs in here
-     * when the native lib ships — same interface, no call-site changes.
+     * Injected predictor. Framework-instantiated services can't take
+     * constructor params, so this is field-injected: [initEngine] assigns
+     * the [PredictorFactory] decision ([UniFfiPredictor] default,
+     * [StubPredictor] ONLY as the explicit degraded path with [engineStatus]
+     * set). Tests assign a fake directly. Null until [initEngine] finishes;
+     * call sites treat null as "engine loading" (the status line says so)
+     * and retry on the next keystroke — never a hard-coded default engine.
      */
-    private val predictor: Predictor = StubPredictor()
+    internal var predictor: Predictor? = null
+
+    /**
+     * User-visible engine state. Null = live Rust engine. Non-null =
+     * loading or degraded-with-cause ([KbCore.isAvailable] == false or init
+     * failure; see `PredictorFactory.Decision.Degraded.reason`). Rendered in
+     * the IME status line — the degraded state NEVER degrades silently.
+     */
+    internal var engineStatus by mutableStateOf<String?>(null)
+
+    /** Last suggest result (words): caller-observed `shown` for learn/reject. */
+    private var lastShown: List<String> = emptyList()
 
     override fun onCreate() {
         super.onCreate()
@@ -165,7 +181,81 @@ class KbInputMethodService : InputMethodService() {
             @Suppress("unused")
             val nativeAvailable = KbCore.isAvailable()
         }
+        initEngine()
     }
+
+    /**
+     * Engine bring-up off the main thread (asset I/O + wordlist parse +
+     * per-pack FST rebuild). Merges `words[]` of [BASE_PACK_ASSETS] into one
+     * base JSON array for `Predictor.new`, loads `layouts/cat_map.json`,
+     * then [PredictorFactory.create] (no per-word FFI — batch strings).
+     * Real engine → [engineStatus] = null. ANY failure (missing asset,
+     * malformed pack, missing `.so`) → degraded stub + [engineStatus]
+     * carries the cause for the status line + gesture log.
+     *
+     * Extension packs (js/rust/html/emoji/numbers/math/medical) are NOT
+     * bundled yet — their tabs rank base + personal only until the pack
+     * wiring lands (explicit gap, tracked in the FFI handoff report).
+     */
+    private fun initEngine() {
+        engineStatus = "Engine loading…"
+        serviceScope.launch {
+            val decision = try {
+                val baseJson = loadBaseWordlist()
+                val catMap = loadAssetTextOrNull("layouts/cat_map.json")
+                PredictorFactory.create(baseJson, emptyList(), catMap)
+            } catch (e: Exception) {
+                PredictorFactory.Decision.Degraded(
+                    StubPredictor(),
+                    "Engine asset load failed: ${e.message}"
+                )
+            }
+            predictor = decision.predictor
+            when (decision) {
+                is PredictorFactory.Decision.Real -> engineStatus = null
+                is PredictorFactory.Decision.Degraded -> {
+                    engineStatus = decision.reason
+                    try {
+                        gestureLog.record("engine", "init", "degraded", decision.reason)
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        }
+    }
+
+    /** Merged `words[]` of the base packs → single base JSON array string. */
+    private fun loadBaseWordlist(): String {
+        val merged = StringBuilder("[")
+        var first = true
+        for (path in BASE_PACK_ASSETS) {
+            val text = try {
+                assets.open(path).bufferedReader().use { it.readText() }
+            } catch (e: Exception) {
+                throw IllegalStateException("IME asset missing: $path (${e.message})")
+            }
+            val words = try {
+                org.json.JSONObject(text).getJSONArray("words")
+            } catch (e: Exception) {
+                throw IllegalStateException("Pack $path: missing/invalid words[] (${e.message})")
+            }
+            for (i in 0 until words.length()) {
+                if (!first) merged.append(",")
+                first = false
+                merged.append(words.get(i).toString())
+            }
+        }
+        merged.append("]")
+        if (first) throw IllegalStateException("Base wordlist empty: $BASE_PACK_ASSETS")
+        return merged.toString()
+    }
+
+    private fun loadAssetTextOrNull(path: String): String? =
+        try {
+            assets.open(path).bufferedReader().use { it.readText() }
+        } catch (_: Exception) {
+            null
+        }
 
     /**
      * Reloads Gesture Tuning prefs (thresholds + 12-key opt-in). Called from
@@ -226,7 +316,7 @@ class KbInputMethodService : InputMethodService() {
                         },
                         onSym = { showGenericSymbolsSheet() }
                     ),
-                    statusLine = gestureError,
+                    statusLine = engineStatus ?: gestureError,
                     onError = { gestureError = it },
                     qwertyActive = qwertyFallback
                 )
@@ -309,7 +399,7 @@ class KbInputMethodService : InputMethodService() {
     override fun onDestroy() {
         serviceScope.cancel()
         try {
-            predictor.close()
+            predictor?.close()
         } catch (_: Exception) {
         }
         cachedInputView = null
@@ -398,15 +488,23 @@ class KbInputMethodService : InputMethodService() {
     private fun commitTopMatchNow(query: String) {
         val snapshot = query
         val layoutId = activeLayoutId
+        val tab = activeAssetId
         serviceScope.launch {
+            val p = predictor
+            if (p == null) {
+                gestureLog.record("pad", "tap", "emoji-no-engine", snapshot)
+                liveCandidates = emptyList()
+                return@launch
+            }
             val prev = prevWord()
             val result = try {
-                suggestWithLayout(predictor, snapshot, prev, layoutId, limit = 30)
+                suggestWithLayout(p, snapshot, prev, layoutId, tab, limit = EXPAND_LIMIT)
             } catch (e: Exception) {
                 reportGestureError("Emoji lookup failed: ${e.message}")
                 emptyList()
             }
             if (result.isNotEmpty()) {
+                lastShown = result.map { it.word }
                 liveCandidates = result.map { it.word }
                 commitCandidate(result.first().word)
             } else {
@@ -500,7 +598,7 @@ class KbInputMethodService : InputMethodService() {
         }
         qwertyBuffer.append(text)
         currentInputConnection?.setComposingText(qwertyBuffer.toString(), 1)
-        refreshSuggestions(qwertyBuffer.toString())
+        refreshQwertySuggestions(qwertyBuffer.toString())
     }
 
     internal fun onQwertyEnter() {
@@ -508,19 +606,66 @@ class KbInputMethodService : InputMethodService() {
         handleEnter()
     }
 
-    private fun refreshSuggestions(query: String) {
+    /**
+     * Single-fetch suggest: ONE engine call per keystroke (batch-string
+     * discipline — no per-word FFI), fetching [EXPAND_LIMIT] candidates.
+     * The strip pages [STRIP_LIMIT] inline from that same list; expand-all
+     * shows all [EXPAND_LIMIT]. [activeAssetId] selects the category boost,
+     * [activeLayoutId] the pad that encoded the seq.
+     */
+    private fun refreshSuggestions(query: String, limit: Int = EXPAND_LIMIT) {
         val snapshot = query
         val layoutId = activeLayoutId
+        val tab = activeAssetId
         serviceScope.launch {
+            val p = predictor
+            // Engine still loading (status line says so): skip this
+            // keystroke's fetch; the next keystroke retries.
+            if (p == null) return@launch
             val prev = prevWord()
             val result = try {
-                // Shared Predictor path; layout_id is an encoder flag only.
-                // Explicit limit 30 feeds both the 3-inline strip and the
-                // 30-item expand-all list from one fetch.
-                suggestWithLayout(predictor, snapshot, prev, layoutId, limit = 30)
-            } catch (_: Exception) {
+                suggestWithLayout(p, snapshot, prev, layoutId, tab, limit)
+            } catch (e: Exception) {
+                reportGestureError("Suggest failed: ${e.message}")
                 emptyList()
             }
+            lastShown = result.map { it.word }
+            liveCandidates = result.map { it.word }
+        }
+    }
+
+    /**
+     * QWERTY encoder: raw letters → engine `encode` under the active pad →
+     * digit seq → shared suggest path. Only this encoder differs from T9
+     * (two FFI calls per keystroke: encode + suggest; still no per-word
+     * chatter). Unencodable buffers clear the strip explicitly.
+     */
+    private fun refreshQwertySuggestions(raw: String) {
+        val snapshot = raw
+        val layoutId = activeLayoutId
+        val tab = activeAssetId
+        serviceScope.launch {
+            val p = predictor
+            if (p == null) return@launch
+            val prev = prevWord()
+            val seq = try {
+                p.encode(snapshot, layoutId)
+            } catch (e: Exception) {
+                reportGestureError("Encode failed: ${e.message}")
+                return@launch
+            }
+            if (seq.isEmpty()) {
+                lastShown = emptyList()
+                liveCandidates = emptyList()
+                return@launch
+            }
+            val result = try {
+                suggestWithLayout(p, seq, prev, layoutId, tab, EXPAND_LIMIT)
+            } catch (e: Exception) {
+                reportGestureError("Suggest failed: ${e.message}")
+                emptyList()
+            }
+            lastShown = result.map { it.word }
             liveCandidates = result.map { it.word }
         }
     }
@@ -551,7 +696,6 @@ class KbInputMethodService : InputMethodService() {
      * picking another candidate, records a reject).
      */
     private fun commitCandidateWithTerminator(word: String, terminator: String) {
-        val prev = prevWord()
         val layoutId = activeLayoutId
         val text = if (capsNext) word.replaceFirstChar { it.uppercase() } else word
         capsNext = false
@@ -563,11 +707,19 @@ class KbInputMethodService : InputMethodService() {
         lastCommitTs = System.currentTimeMillis()
         // Fire-and-forget learn on Dispatchers.Default inside Predictor,
         // gated on password + incognito + input class + category.
+        // Category is the pack id (activeAssetId), NOT the ctx-prev word;
+        // `shown` is the caller-observed last suggest result (plan/05 #5:
+        // O(1) personal op, no suggest-in-lock).
         if (shouldLearnNow()) {
+            val p = predictor
+            val shown = lastShown
+            lastShown = emptyList()
+            if (p == null) return
             serviceScope.launch {
                 try {
-                    learnWithLayout(predictor, word, prev, layoutId)
-                } catch (_: Exception) {
+                    learnWithLayout(p, word, activeAssetId, shown, layoutId)
+                } catch (e: Exception) {
+                    reportGestureError("Learn failed: ${e.message}")
                 }
             }
         }
@@ -598,7 +750,7 @@ class KbInputMethodService : InputMethodService() {
             qwertyBuffer.deleteCharAt(qwertyBuffer.length - 1)
             if (qwertyBuffer.isEmpty()) ic.finishComposingText()
             else ic.setComposingText(qwertyBuffer.toString(), 1)
-            refreshSuggestions(qwertyBuffer.toString())
+            refreshQwertySuggestions(qwertyBuffer.toString())
             return
         }
         // Real text deletion: a commit inside the 5s window counts as a
@@ -616,9 +768,15 @@ class KbInputMethodService : InputMethodService() {
         }
         lastCommitWord = null
         gestureLog.record("pad", "delete-within-5s", "reject", word)
+        val p = predictor
+        if (p == null) {
+            reportGestureError("Reject dropped (engine loading): $word")
+            return
+        }
+        val shown = lastShown
         serviceScope.launch {
             try {
-                predictor.reject(word)
+                p.rejectWithShown(word, shown)
             } catch (e: Exception) {
                 reportGestureError("Reject logging failed: ${e.message}")
             }
@@ -915,6 +1073,12 @@ class KbInputMethodService : InputMethodService() {
         val DEFAULT_LEARN_FLAGS: Map<String, Boolean> = mapOf(
             "numbers" to false,
             "math" to false
+        )
+
+        /** Base wordlist packs merged into `Predictor.new` (all prio 0). */
+        val BASE_PACK_ASSETS: List<String> = listOf(
+            "packs/words_en.json",
+            "packs/nepali.json"
         )
     }
 }
