@@ -1,12 +1,23 @@
 //! Personal dictionary: learned words with counts + last_seen,
 //! LFU cap, block tombstones, password-mode bypass, SQLite persistence.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// LFU cap for the personal dictionary (task requirement: 10k).
+/// LFU cap for the personal dictionary: 10k entries (tombstones exempt).
+///
+/// Cap-dispute ruling (plan `06-persistence-power.md`, one commit): SPEC §4
+/// says 20k LRU, code said 10k LFU. Keeping **10k LFU** because (a) the power
+/// budget in the same plan is sized for "full 10k personal in RAM ~2-3MB" —
+/// 20k doubles that resident set for no measured gain; (b) LFU protects
+/// high-frequency learned words from recency churn (typing locality bursts
+/// would evict good words under LRU); (c) the existing eviction path is
+/// tested (`lfu_cap_evicts_coldest`, `tombstones_exempt_from_eviction`) and a
+/// policy flip would invalidate the tuning gate without new data. If a
+/// longitudinal study shows recency beats frequency, flip `PERSONAL_CAP` +
+/// `evict_if_needed` together with the gate re-run — not piecemeal.
 pub const PERSONAL_CAP: usize = 10_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,6 +63,13 @@ pub struct PersonalDict {
     /// stored, satisfying the password-mode bypass requirement.
     pub password_mode: bool,
     pub cap: usize,
+    /// Keys mutated since the last durable flush. The hot path (`learn` /
+    /// `forget` / `record_reject`) only inserts here — never touches disk.
+    /// [`Store::flush`](crate::store::Store::flush) upserts exactly these
+    /// rows (`INSERT … ON CONFLICT DO UPDATE`), then clears the sets, so a
+    /// keystroke costs O(1) RAM + amortized O(dirty) flash.
+    dirty: HashSet<String>,
+    dirty_bigrams: HashSet<(String, String)>,
 }
 
 fn key_of(word: &str) -> String {
@@ -139,6 +157,7 @@ impl PersonalDict {
             }
         }
         self.evict_if_needed(Some(&k));
+        self.dirty.insert(k);
         true
     }
 
@@ -154,7 +173,7 @@ impl PersonalDict {
             }
             None => {
                 self.entries.insert(
-                    k,
+                    k.clone(),
                     PersonalEntry {
                         word: word.to_string(),
                         category: String::new(),
@@ -168,6 +187,7 @@ impl PersonalDict {
                 );
             }
         }
+        self.dirty.insert(k);
         true
     }
 
@@ -179,7 +199,7 @@ impl PersonalDict {
             e.rej += 1;
         } else {
             self.entries.insert(
-                k,
+                k.clone(),
                 PersonalEntry {
                     word: word.to_string(),
                     category: String::new(),
@@ -192,6 +212,7 @@ impl PersonalDict {
                 },
             );
         }
+        self.dirty.insert(k);
     }
 
     pub fn record_bigram(&mut self, prev: &str, word: &str) {
@@ -199,8 +220,9 @@ impl PersonalDict {
             return;
         }
         let k = (prev.to_lowercase(), word.to_lowercase());
-        *self.bigrams.entry(k).or_insert(0) += 1;
+        *self.bigrams.entry(k.clone()).or_insert(0) += 1;
         *self.prev_counts.entry(prev.to_lowercase()).or_insert(0) += 1;
+        self.dirty_bigrams.insert(k);
     }
 
     pub fn get(&self, word: &str) -> Option<&PersonalEntry> {
@@ -292,13 +314,70 @@ impl PersonalDict {
         d
     }
 
+    /// Strict JSONL parse: every non-blank line must decode, otherwise
+    /// `Err` names the first bad line number. Used by startup recovery
+    /// ([`crate::store::recover_personal`]) so a corrupt `personal.jsonl`
+    /// triggers snapshot-restore instead of silently loading partial data.
+    /// (`from_jsonl` stays lenient for loose interchange input.)
+    pub fn from_jsonl_strict(s: &str) -> Result<Self, String> {
+        let mut d = Self::new();
+        for (i, line) in s.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let e: PersonalEntry = serde_json::from_str(line)
+                .map_err(|e| format!("line {}: {e}", i + 1))?;
+            if e.word.trim().is_empty() {
+                return Err(format!("line {}: empty word", i + 1));
+            }
+            d.entries.insert(key_of(&e.word), e);
+        }
+        Ok(d)
+    }
+
+    /// Personal bigram counts as JSONL (`{"prev","word","count"}` per line),
+    /// the `bigrams.jsonl` sync-folder file (`docs/SYNC.md` §3).
+    pub fn bigrams_jsonl(&self) -> String {
+        let mut pairs: Vec<(&(String, String), &u64)> = self.bigrams.iter().collect();
+        pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let mut out = String::new();
+        for ((prev, word), count) in pairs {
+            let line = serde_json::json!({"prev": prev, "word": word, "count": count});
+            out.push_str(&line.to_string());
+            out.push('\n');
+        }
+        out
+    }
+
+    /// True when mutations since the last flush exist (flush work to do).
+    pub fn is_flush_dirty(&self) -> bool {
+        !self.dirty.is_empty() || !self.dirty_bigrams.is_empty()
+    }
+
+    /// Apply one `wal.log` line (a `PersonalEntry` JSON row) during recovery
+    /// replay: last-writer-wins per key, tombstones preserved. Replayed rows
+    /// are marked dirty so the next flush persists them to SQLite too.
+    pub(crate) fn apply_wal_line(&mut self, line: &str) -> Result<(), String> {
+        let e: PersonalEntry =
+            serde_json::from_str(line).map_err(|e| format!("bad WAL row: {e}"))?;
+        if e.word.trim().is_empty() {
+            return Err("bad WAL row: empty word".to_string());
+        }
+        let k = key_of(&e.word);
+        self.dirty.insert(k.clone());
+        self.entries.insert(k, e);
+        Ok(())
+    }
+
     // ---- SQLite persistence (rusqlite, bundled static build) ----
     //
-    // Single-writer discipline: each save/load opens its own short-lived
-    // `Connection`, enables WAL mode, and runs one transaction to
-    // completion. `Predictor` already serializes access behind a `Mutex`,
-    // so there is exactly one writer at a time; no pool, no shared
-    // connection across threads.
+    // Single-writer discipline: the one `Store` connection behind
+    // `Predictor`'s `Mutex` is the only writer. Flushes upsert dirty rows
+    // only (`INSERT … ON CONFLICT(key) DO UPDATE`); there is deliberately no
+    // `DELETE FROM personal` anywhere — a power cut mid-flush can never lose
+    // more than the uncommitted batch, and the dirty set is retained on
+    // error so the next flush retries it.
 
     pub const SQLITE_SCHEMA: &str = "
         PRAGMA journal_mode=WAL;
@@ -336,39 +415,103 @@ impl PersonalDict {
         Ok(conn)
     }
 
-    /// Persist entries + bigrams to a SQLite file.
-    pub fn save_to_sqlite(&self, path: &Path) -> Result<(), String> {
-        let mut conn = Self::open_db(path)?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM personal", [])
-            .map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM bigrams", [])
-            .map_err(|e| e.to_string())?;
+    /// Upsert one entry row. Shared by dirty-flush and full-save paths.
+    fn upsert_entry(conn: &rusqlite::Connection, k: &str, e: &PersonalEntry) -> Result<(), String> {
+        conn.execute(
+            "INSERT INTO personal
+             (key, word, category, count, acc, rej, last_seen, deleted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(key) DO UPDATE SET
+               word=excluded.word, category=excluded.category,
+               count=excluded.count, acc=excluded.acc, rej=excluded.rej,
+               last_seen=excluded.last_seen, deleted=excluded.deleted",
+            rusqlite::params![
+                k,
+                e.word,
+                e.category,
+                e.count as i64,
+                e.acc as i64,
+                e.rej as i64,
+                e.last_seen,
+                if e.deleted { 1i64 } else { 0i64 },
+            ],
+        )
+        .map_err(|e| format!("personal: upsert {k:?}: {e}"))?;
+        Ok(())
+    }
+
+    /// Flush dirty rows to an already-open connection (see
+    /// [`Store::flush`](crate::store::Store::flush)). Returns
+    /// `(personal_rows, bigram_rows)` written, plus the JSONL lines for the
+    /// `wal.log` append. Dirty sets clear only after commit; on `Err` they
+    /// are retained for retry — no silent loss.
+    pub(crate) fn flush_dirty_to_conn(
+        &mut self,
+        conn: &mut rusqlite::Connection,
+    ) -> Result<(usize, usize, Vec<String>), String> {
+        if !self.is_flush_dirty() {
+            return Ok((0, 0, Vec::new()));
+        }
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("personal: begin flush tx: {e}"))?;
+        let mut personal_rows = 0;
+        let mut wal_lines = Vec::with_capacity(self.dirty.len());
+        // Deterministic row order so WAL / tests see stable output.
+        let mut keys: Vec<String> = self.dirty.iter().cloned().collect();
+        keys.sort();
+        for k in &keys {
+            if let Some(e) = self.entries.get(k) {
+                Self::upsert_entry(&tx, k, e)?;
+                wal_lines.push(
+                    serde_json::to_string(e)
+                        .map_err(|e| format!("personal: encode WAL row {k:?}: {e}"))?,
+                );
+                personal_rows += 1;
+            }
+        }
+        let mut bigram_rows = 0;
         {
             let mut st = tx
                 .prepare(
-                    "INSERT INTO personal
-                     (key, word, category, count, acc, rej, last_seen, deleted)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    "INSERT INTO bigrams (prev, word, count) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(prev, word) DO UPDATE SET count=excluded.count",
                 )
-                .map_err(|e| e.to_string())?;
-            for (k, e) in &self.entries {
-                st.execute(rusqlite::params![
-                    k,
-                    e.word,
-                    e.category,
-                    e.count as i64,
-                    e.acc as i64,
-                    e.rej as i64,
-                    e.last_seen,
-                    if e.deleted { 1i64 } else { 0i64 },
-                ])
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format!("personal: prepare bigram upsert: {e}"))?;
+            let mut bkeys: Vec<(String, String)> = self.dirty_bigrams.iter().cloned().collect();
+            bkeys.sort();
+            for (prev, word) in &bkeys {
+                if let Some(c) = self.bigrams.get(&(prev.clone(), word.clone())) {
+                    st.execute(rusqlite::params![prev, word, *c as i64])
+                        .map_err(|e| {
+                            format!("personal: upsert bigram ({prev:?}, {word:?}): {e}")
+                        })?;
+                    bigram_rows += 1;
+                }
             }
+        }
+        tx.commit()
+            .map_err(|e| format!("personal: commit flush tx: {e}"))?;
+        self.dirty.clear();
+        self.dirty_bigrams.clear();
+        Ok((personal_rows, bigram_rows, wal_lines))
+    }
+
+    /// Persist all entries + bigrams to a SQLite file (upsert-all, no
+    /// `DELETE`). Compat path for callers without a `Store`; the steady
+    /// path is dirty-flush via `Store`.
+    pub fn save_to_sqlite(&self, path: &Path) -> Result<(), String> {
+        let mut conn = Self::open_db(path)?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for (k, e) in &self.entries {
+            Self::upsert_entry(&tx, k, e)?;
         }
         {
             let mut st = tx
-                .prepare("INSERT INTO bigrams (prev, word, count) VALUES (?1, ?2, ?3)")
+                .prepare(
+                    "INSERT INTO bigrams (prev, word, count) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(prev, word) DO UPDATE SET count=excluded.count",
+                )
                 .map_err(|e| e.to_string())?;
             for ((prev, word), c) in &self.bigrams {
                 st.execute(rusqlite::params![prev, word, *c as i64])
@@ -533,6 +676,58 @@ mod tests {
         assert!(loaded.is_blocked("spam"));
         assert_eq!(loaded.bigram_counts("say", "hello").0, 1);
         let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn save_never_deletes_preexisting_rows() {
+        // Upsert-only proof: saving a smaller dict into a DB that already
+        // holds rows must leave those rows intact (the old DELETE+reinsert
+        // would have wiped them).
+        let dir = std::env::temp_dir().join("kbcore_personal_upsert.sqlite");
+        let _ = std::fs::remove_file(&dir);
+        let mut d = PersonalDict::new();
+        d.learn("keepme", "EN");
+        d.save_to_sqlite(&dir).unwrap();
+        let mut d2 = PersonalDict::new();
+        d2.learn("newcomer", "EN");
+        d2.save_to_sqlite(&dir).unwrap();
+        let loaded = PersonalDict::load_from_sqlite(&dir).unwrap();
+        assert!(loaded.get("keepme").is_some(), "upsert must not delete");
+        assert!(loaded.get("newcomer").is_some());
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn strict_jsonl_rejects_corruption_with_line_number() {
+        let mut d = PersonalDict::new();
+        d.learn("hello", "EN");
+        let mut s = d.to_jsonl();
+        s.push_str("{bad json\n");
+        let err = PersonalDict::from_jsonl_strict(&s).unwrap_err();
+        assert!(err.contains("line 2"), "unexpected: {err}");
+        // Lenient reader still loads the good prefix (interchange compat).
+        assert!(PersonalDict::from_jsonl(&s).get("hello").is_some());
+    }
+
+    #[test]
+    fn dirty_set_tracks_mutations() {
+        let mut d = PersonalDict::new();
+        assert!(!d.is_flush_dirty());
+        d.learn("a", "EN");
+        d.record_bigram("say", "a");
+        assert!(d.is_flush_dirty());
+    }
+
+    #[test]
+    fn bigrams_jsonl_roundtrip_shape() {
+        let mut d = PersonalDict::new();
+        d.record_bigram("say", "hello");
+        let s = d.bigrams_jsonl();
+        assert_eq!(s.lines().count(), 1);
+        let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+        assert_eq!(v["prev"], "say");
+        assert_eq!(v["word"], "hello");
+        assert_eq!(v["count"], 1);
     }
 
     #[test]
