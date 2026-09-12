@@ -396,6 +396,7 @@ impl DictionaryStack {
             seq: String,
             freq_base: u64,
             cat: String,
+            lang: String,
             priority: i32,
             keyfit: f64,
         }
@@ -437,6 +438,7 @@ impl DictionaryStack {
                             seq: eseq,
                             freq_base: e.freq,
                             cat: e.cat.clone(),
+                            lang: e.lang.clone(),
                             priority: e.priority,
                             keyfit,
                         },
@@ -452,13 +454,23 @@ impl DictionaryStack {
             word: String,
             seq: String,
             cat: String,
+            lang: String,
             score: f64,
             priority: i32,
         }
         let mut scored: Vec<Scored> = Vec::new();
-        // Cap matches at 200 before the top-N heap (SPEC).
+        // Cap matches at 200 before the top-N heap (SPEC). The pre-truncate
+        // order must be a TOTAL order: `merged` is a HashMap (RandomState
+        // iteration), so sorting by `freq_base` alone lets equal-freq ties
+        // resolve to a different 200-set on every call. (freq desc, word
+        // asc, lang asc) is total over the dedupe key space.
         let mut items: Vec<Merged> = merged.into_values().collect();
-        items.sort_by(|a, b| b.freq_base.cmp(&a.freq_base));
+        items.sort_by(|a, b| {
+            b.freq_base
+                .cmp(&a.freq_base)
+                .then_with(|| a.word.cmp(&b.word))
+                .then_with(|| a.lang.cmp(&b.lang))
+        });
         items.truncate(200);
 
         for m in items {
@@ -490,6 +502,11 @@ impl DictionaryStack {
                 rejects: rej,
             };
             let score = score_candidate(&input, &self.weights);
+            debug_assert!(
+                !score.is_nan(),
+                "suggest: score must never be NaN for {:?} (inputs cannot NaN: log10(>=1), bounded exp)",
+                m.word
+            );
             if score < self.weights.hide_threshold {
                 continue;
             }
@@ -497,6 +514,7 @@ impl DictionaryStack {
                 word: m.word,
                 seq: m.seq,
                 cat: m.cat,
+                lang: m.lang,
                 score,
                 priority: m.priority,
             });
@@ -509,6 +527,7 @@ impl DictionaryStack {
                 .then_with(|| a.word.len().cmp(&b.word.len()))
                 .then_with(|| a.word.cmp(&b.word))
                 .then_with(|| b.priority.cmp(&a.priority))
+                .then_with(|| a.lang.cmp(&b.lang))
         });
         scored.truncate(limit);
         scored
@@ -553,6 +572,53 @@ mod tests {
                 {"w":"help","freq":200,"cat":"EN"}]"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn truncate_is_total_order_repeat_stable() {
+        // 3^5 = 243 words over {a,b,c}, all encoding to "22222" with equal
+        // freq: the 200-truncate MUST resolve ties totally. `merged` is a
+        // HashMap with per-instance RandomState, so any freq-only sort would
+        // pick a different 200-set across calls.
+        let mut words = Vec::new();
+        for a in ['a', 'b', 'c'] {
+            for b in ['a', 'b', 'c'] {
+                for c in ['a', 'b', 'c'] {
+                    for d in ['a', 'b', 'c'] {
+                        for e in ['a', 'b', 'c'] {
+                            words.push(format!("{a}{b}{c}{d}{e}"));
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(words.len(), 243);
+        let json = format!(
+            "[{}]",
+            words
+                .iter()
+                .map(|w| format!(r#"{{"w":"{w}","freq":100,"cat":"EN"}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let stack = DictionaryStack::new(DictionaryStack::load_base_json(&json).unwrap());
+        let first = stack.suggest("", "22222", "EN", 30);
+        assert_eq!(first.len(), 30);
+        for _ in 0..50 {
+            let again = stack.suggest("", "22222", "EN", 30);
+            assert_eq!(
+                first.iter().map(|s| &s.word).collect::<Vec<_>>(),
+                again.iter().map(|s| &s.word).collect::<Vec<_>>(),
+                "suggest must be repeat-stable under equal-freq ties"
+            );
+        }
+        // Total order => the survivors are the lexicographically first 200.
+        let all = stack.suggest("", "22222", "EN", 200);
+        assert_eq!(all.len(), 200);
+        let mut lex: Vec<String> = words.clone();
+        lex.sort();
+        assert_eq!(all[0].word, lex[0]);
+        assert_eq!(all[199].word, lex[199]);
     }
 
     #[test]
