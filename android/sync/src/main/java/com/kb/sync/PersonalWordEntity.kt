@@ -4,7 +4,7 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 
 /**
- * Personal-dictionary row with LWW-sync metadata.
+ * Personal-dictionary row with local-only metadata.
  * Tombstones (`deleted = true`) are exempt from LRU eviction.
  */
 @Entity(tableName = "personal_words")

@@ -15,14 +15,15 @@ import androidx.room.Upsert
  * [KEEP_PERSONAL] live rows by `(count DESC, lastSeen DESC)` — the SQL twin
  * of the core 10k-LFU cap (`core-rust/src/personal.rs`, `PERSONAL_CAP`).
  * Block tombstones (`deleted = 1`) are exempt from eviction, exactly as in
- * core and in `SyncMerge` (tombstones replicate, never resurrect).
+ * core. Tombstones are local-only (single-device scope): export/import
+ * carries them as rows, but no merge reconciles them across devices.
  */
 @Dao
 interface PersonalWordDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entry: PersonalWordEntity)
 
-    /** Batch upsert for flush/merge paths — one transaction, no deletes. */
+    /** Batch upsert for flush/import paths — one transaction, no deletes. */
     @Upsert
     suspend fun upsertAll(entries: List<PersonalWordEntity>)
 

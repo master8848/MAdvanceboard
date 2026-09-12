@@ -1,6 +1,6 @@
-# User Guide — 9-Key Predictive Keyboard
+# User Guide — Configurable Predictive Keyboard (9-key default)
 
-## 1. How 9-key typing works
+## 1. How pad typing works (9-key default, board per category)
 
 Each key emits one digit (`1`–`9`). The encoder maps a keypress run to a
 sequence, e.g. `hello` → `43556`. The engine looks the sequence up in every
@@ -70,11 +70,12 @@ is this word suggested?".
 
 - **Block:** long-press candidate → Block. Writes a tombstone
   `{del: true}`: hidden everywhere, exempt from LRU eviction and cap,
-  replicated on sync, never resurrected except by explicit unblock.
+  kept locally (single-device scope, no cross-device merge), removed
+  only by explicit unblock.
 - **Forget (unblock):** Settings → Personal dictionary → search word →
   Remove block.
 - Reject signal is automatic too: deleting a committed word within 5 s or
   picking another candidate increments `rej` (decayed over 30 d).
 
-Related: `PRIVACY.md` (what is never learned), `SYNC.md` (how blocks
-sync), `TUNING.md` (ranking weights), `EXTENSIONS.md` (adding packs).
+Related: `PRIVACY.md` (what is never learned), `SYNC.md` (local-only
+export/import), `TUNING.md` (ranking weights), `EXTENSIONS.md` (adding packs).

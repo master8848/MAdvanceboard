@@ -3,9 +3,14 @@ package com.kb.sync
 import org.json.JSONObject
 
 /**
- * Last-writer-wins per-word merge over `{count, last_seen, del, device_id}`.
- * Newer `lastSeen` wins; ties break toward lexicographically larger `deviceId`.
- * Tombstones replicate like any other row and are never resurrected by merge.
+ * Local-only JSONL export / import for the personal dictionary.
+ *
+ * Single-device scope: there is NO multi-device merge. An earlier
+ * whole-row LWW `mergeWord`/`mergeAll` silently dropped accept/reject
+ * counters, so it was removed — see git history. Importing a file
+ * replaces (upserts) local rows as-is; nothing reconciles counters
+ * across devices. Export/import works locally; merge does not exist.
+ *
  * Wire name is `del` (canonical, SPEC §5); `deleted` (SPEC §4) is still
  * accepted on read for compat.
  */
@@ -23,23 +28,27 @@ data class JsonlImportOutcome(
 )
 
 object SyncMerge {
-    fun mergeWord(local: PersonalWordEntity, remote: PersonalWordEntity): PersonalWordEntity {
-        if (remote.lastSeen > local.lastSeen) return remote
-        if (local.lastSeen > remote.lastSeen) return local
-        return if (remote.deviceId >= local.deviceId) remote else local
-    }
+    /**
+     * No merge: multi-device reconciliation is not supported (single-device
+     * scope). Imported rows are applied as-is by the caller; calling this
+     * is a programming error, so it throws loudly instead of silently
+     * picking a row and dropping the other side's counters.
+     */
+    fun mergeWord(local: PersonalWordEntity, remote: PersonalWordEntity): PersonalWordEntity =
+        throw UnsupportedOperationException(
+            "SyncMerge.mergeWord: no multi-device merge (single-device scope); " +
+                "import rows as-is instead of reconciling"
+        )
 
+    /** See [mergeWord]: multi-device reconciliation is not supported. */
     fun mergeAll(
         local: List<PersonalWordEntity>,
         remote: List<PersonalWordEntity>
-    ): List<PersonalWordEntity> {
-        val out = local.associateBy { it.word }.toMutableMap()
-        for (r in remote) {
-            val l = out[r.word]
-            out[r.word] = if (l == null) r else mergeWord(l, r)
-        }
-        return out.values.toList()
-    }
+    ): List<PersonalWordEntity> =
+        throw UnsupportedOperationException(
+            "SyncMerge.mergeAll: no multi-device merge (single-device scope); " +
+                "import rows as-is instead of reconciling"
+        )
 
     /** Export one row per line as JSONL. Tombstone key is `del` (canonical). */
     fun toJsonl(rows: List<PersonalWordEntity>): String =

@@ -10,8 +10,10 @@ import kotlinx.coroutines.flow.first
 import java.util.concurrent.TimeUnit
 
 /**
- * Periodic placeholder sync. Runs every 24h (within the 12-24h budget) and
- * only when the user has opted in via [SyncPreferences]. Real transport TBD.
+ * Local-only maintenance job. Runs every 24h (within the 12-24h budget)
+ * and only when the user has opted in via [SyncPreferences]. Single-device
+ * scope: this reads local rows (export-format validation via
+ * [SyncMerge.toJsonl]) — there is no transport and no multi-device merge.
  */
 class SyncWorker(appContext: Context, params: WorkerParameters) :
     CoroutineWorker(appContext, params) {

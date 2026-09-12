@@ -56,5 +56,5 @@ on/off. Reset-to-defaults button restores the table above.
   (`core-rust/src/personal.rs`), SPEC stays the aspirational target.
 - Blocked tombstones are exempt from eviction and decay.
 
-Related: `USER.md` (suggestion bar, block), `SYNC.md` (counters merge by
-max), `EXTENSIONS.md` (pack priority).
+Related: `USER.md` (suggestion bar, block), `SYNC.md` (local-only
+export/import, no merge), `EXTENSIONS.md` (pack priority).

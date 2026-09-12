@@ -93,11 +93,11 @@ Stack (low→high): `base EN/NE (prio 0)` < `extension packs (10-90, user-ordere
 - Personal dict rules:
   1. Never overwritten by pack updates; stored separately `personal.jsonl`.
   2. Auto-add: OOV word committed (typed via QWERTY/multitap or selected from expand-all raw) with ≥2 accepts in 7d → promoted to personal with `freq_personal=accepts`.
-  3. Block: user action Block → tombstone `{deleted:true}`; hidden everywhere, survives sync.
+  3. Block: user action Block → tombstone `{deleted:true}`; hidden everywhere, survives local export/import (single-device scope, no cross-device merge).
   4. Decay: `freq_personal *= 0.98` monthly if unused; never deletes, only demotes.
   5. Cap: 20k entries LRU-evicted (blocked tombstones exempt).
 
-## 5. Sync / Export Format (JSONL + merge)
+## 5. Sync / Export Format (JSONL, local only — single-device scope)
 
 Each dict row (base, pack, personal, session log) is JSONL:
 ```json
@@ -105,7 +105,8 @@ Each dict row (base, pack, personal, session log) is JSONL:
 ```
 
 - Export session: `session-<date>.jsonl.gz` = personal delta + `log.jsonl` (accepted/rejected events `{ts, seq, ctx, chosen, shown, action}`). Import replays log through ranking to rebuild counters (deterministic).
-- Sync: file-based (user picks folder/WebDAV/Drive). Files: `personal.jsonl`, `bigrams.jsonl`, `snapshot-<ts>.gz`, `wal.log`. Merge rule: **last-write-wins per word-id with counters max-merge**: for same `id`, keep record with max `ts`; `acc/rej/freq = max(a.acc,b.acc)` element-wise max (counters monotonic, never decrement except decay which bumps `ts`). `del` tombstone wins if its `ts` newest.
+- File layout (user picks folder/WebDAV/Drive): `personal.jsonl`, `bigrams.jsonl`, `snapshot-<ts>.gz`, `wal.log`. Import applies rows as-is (upsert by `id`).
+- No multi-device merge: the earlier last-write-wins + counters max-merge rule was REMOVED (whole-row LWW silently lost counters; unbuilt per plan). Each device keeps its own personal table; `del` tombstones are local-only, never reconciled across devices.
 - Auto-recovery: on startup, if `personal.jsonl` corrupt → restore newest `snapshot`, replay `wal.log`; if both corrupt → start empty personal, keep base functional, notify. Every write is append-to-WAL then batch-compact hourly. Vector clock: single-device HLC (`ts` + deviceId tiebreak) suffices; no server clock trust.
 
 ## 6. Repo Monorepo Layout

@@ -29,8 +29,9 @@ Words committed under those tabs are inserted but never counted.
 
 ## Tombstones (blocked words)
 
-Blocking a word writes `{del: true}`. Tombstones replicate on sync and are
-never resurrected by merge — a delete wins if its `ts` is newest. Unblock
+Blocking a word writes `{del: true}`. Tombstones are local-only
+(single-device scope, no cross-device merge): a blocked word stays
+hidden on this device until you explicitly unblock it. Unblock
 is an explicit user action that bumps `ts`.
 
 ## Incognito / what stays local
@@ -52,4 +53,4 @@ is an explicit user action that bumps `ts`.
 - Deletion: Settings → Personal dictionary → Clear, or uninstall; exported
   files you created must be deleted by you.
 
-Related: `USER.md` (block/forget), `SYNC.md` (file format + merge).
+Related: `USER.md` (block/forget), `SYNC.md` (file format, local only).
