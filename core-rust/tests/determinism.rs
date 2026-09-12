@@ -110,18 +110,18 @@ fn golden_t9_16() {
     check("t9-16", "", "267", "NE", GOLDEN_T9_16_D);
 }
 
-const GOLDEN_T9_9_A: &str = "hello|400ba346c04f7bed|43556|EN|t9-9";
-const GOLDEN_T9_9_B: &str = "fun|40056e8b773ae589|386|EN|t9-9";
-const GOLDEN_T9_9_C: &str = "hello|400a82c4b95772ba|43556|EN|t9-9";
-const GOLDEN_T9_9_D: &str = "wxyz|40034493cb27eaff|9999|EN|t9-9";
-const GOLDEN_T9_9_E: &str = "कमल|4007d41aabbc4b8b|267|NE|t9-9";
-const GOLDEN_T9_12_A: &str = "hello|400ba346c04f7bed|43556|EN|t9-12";
-const GOLDEN_T9_12_B: &str = "a@b|4001a91a8d6fb98b|2*2|EN|t9-12";
-const GOLDEN_T9_12_C: &str = "कमल|4007d41aabbc4b8b|267|NE|t9-12";
-const GOLDEN_T9_16_A: &str = "hello|400ba346c04f7bed|43556|EN|t9-16";
-const GOLDEN_T9_16_B: &str = "fun|40056e8b773ae589|396|EN|t9-16\nrun|4004cab46cfd74e5|896|EN|t9-16";
-const GOLDEN_T9_16_C: &str = "wxyz|40034493cb27eaff|00AA|EN|t9-16";
-const GOLDEN_T9_16_D: &str = "कमल|4007d41aabbc4b8b|267|NE|t9-16";
+const GOLDEN_T9_9_A: &str = "hello|400ba3d70a3d70a4|43556|EN|t9-9";
+const GOLDEN_T9_9_B: &str = "fun|40056e978d4fdf3b|386|EN|t9-9";
+const GOLDEN_T9_9_C: &str = "hello|400a835503456771|43556|EN|t9-9";
+const GOLDEN_T9_9_D: &str = "wxyz|40034395810624dd|9999|EN|t9-9";
+const GOLDEN_T9_9_E: &str = "कमल|4007d4fdf3b645a2|267|NE|t9-9";
+const GOLDEN_T9_12_A: &str = "hello|400ba3d70a3d70a4|43556|EN|t9-12";
+const GOLDEN_T9_12_B: &str = "a@b|4001a9fbe76c8b44|2*2|EN|t9-12";
+const GOLDEN_T9_12_C: &str = "कमल|4007d4fdf3b645a2|267|NE|t9-12";
+const GOLDEN_T9_16_A: &str = "hello|400ba3d70a3d70a4|43556|EN|t9-16";
+const GOLDEN_T9_16_B: &str = "fun|40056e978d4fdf3b|396|EN|t9-16\nrun|4004cac083126e97|896|EN|t9-16";
+const GOLDEN_T9_16_C: &str = "wxyz|40034395810624dd|00AA|EN|t9-16";
+const GOLDEN_T9_16_D: &str = "कमल|4007d4fdf3b645a2|267|NE|t9-16";
 
 /// Seeded fuzz: 2000 pseudo-random `(layout, ctx, digits)` queries, each
 /// executed twice; outputs must be byte-identical, scores never NaN, and

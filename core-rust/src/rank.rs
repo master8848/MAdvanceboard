@@ -115,7 +115,15 @@ pub struct RankInput {
 
 /// Full score `S(w)`.
 pub fn score_candidate(input: &RankInput, w: &RankWeights) -> f64 {
-    w.w_base * base_term(input.freq_base, input.freq_personal)
+    score_candidate_with_base(input, w, base_term(input.freq_base, input.freq_personal))
+}
+
+/// Full score with a caller-supplied base term. The quantized fast path
+/// (plan/05 #7) passes `dequantize_base(entry.base_q)` for
+/// single-contributor candidates with no personal overlay; multi-row
+/// merges and personal-boosted rows use the exact `base_term`.
+pub fn score_candidate_with_base(input: &RankInput, w: &RankWeights, base: f64) -> f64 {
+    w.w_base * base
         + w.w_personal * if input.in_personal { 1.0 } else { 0.0 }
         + w.w_bigram
             * bigram_term(input.bigram_pw, input.bigram_prev, input.bigram_vocab)

@@ -13,7 +13,7 @@ use crate::layout::{KeyMapping, LayoutRegistry, DEFAULT_LAYOUT_ID};
 use crate::mapping::{encode_word, is_one_edit_neighbor};
 use crate::pack::PackFile;
 use crate::personal::{now_quantized, PersonalDict};
-use crate::rank::{score_candidate, RankInput, RankWeights};
+use crate::rank::{base_term, dequantize_base, quantize_base, score_candidate_with_base, RankInput, RankWeights};
 
 /// Layout ids with precomputed sequences (all current built-ins).
 pub const PRECOMPUTED_LAYOUTS: &[&str] = &["t9-9", "t9-12", "t9-16"];
@@ -62,6 +62,18 @@ pub struct DictEntry {
     /// Precomputed `t9-16` sequence (same contract as `seq_t912`).
     #[serde(default)]
     pub seq_t916: String,
+    /// Precomputed dedupe key `lower(word) + "\x1f" + lang`: the suggest
+    /// union clones this instead of `format!` + `to_lowercase` per match
+    /// per keystroke (plan/05 #4). Filled by [`Self::ensure_cached`];
+    /// legacy deserialized rows repair on insert.
+    #[serde(default)]
+    pub norm_key: String,
+    /// Quantized static score `log10(freq+1)` x1000 (see
+    /// [`crate::rank::quantize_base`]): single-contributor candidates skip
+    /// the per-keystroke `log10` (plan/05 #7). Fixed at load, so repeats
+    /// stay byte-identical.
+    #[serde(default)]
+    pub base_q: u16,
 }
 
 impl DictEntry {
@@ -69,6 +81,26 @@ impl DictEntry {
     /// provides one (plan/03 tr-model), else the display word itself.
     pub fn seq_source(&self) -> &str {
         self.tr.as_deref().unwrap_or(&self.word)
+    }
+
+    /// Precompute the allocation-killing caches from the immutable row
+    /// identity (`word`, `lang`, `freq`): dedupe key + quantized static
+    /// score. Called by every constructor; [`Self::ensure_cached`] repairs
+    /// legacy rows.
+    fn cached_parts(word: &str, lang: &str, freq: u64) -> (String, u16) {
+        (format!("{}\x1f{}", word.to_lowercase(), lang), quantize_base(freq))
+    }
+
+    /// Fill empty `norm_key`/`base_q` on legacy rows (deserialized before
+    /// the caches landed, or built by external struct literals). Recompute
+    /// is keyed on `norm_key.is_empty()` — `base_q == 0` is a genuine value
+    /// (`freq == 0`), never a missing marker.
+    pub fn ensure_cached(&mut self) {
+        if self.norm_key.is_empty() {
+            let (norm, q) = Self::cached_parts(&self.word, &self.lang, self.freq);
+            self.norm_key = norm;
+            self.base_q = q;
+        }
     }
 
     /// Build a row from pack parts. Primary seq precedence: explicit
@@ -108,9 +140,12 @@ impl DictEntry {
                 alt,
                 seq_t912: String::new(),
                 seq_t916: String::new(),
+                norm_key: String::new(),
+                base_q: 0,
                 aliases: Vec::new(),
                 aliases_t916: Vec::new(),
             };
+            e.ensure_cached();
             e.fill_aliases();
             return Some(e);
         }
@@ -132,6 +167,8 @@ impl DictEntry {
             alt,
             seq_t912: String::new(),
             seq_t916: String::new(),
+            norm_key: String::new(),
+            base_q: 0,
             aliases: Vec::new(),
             aliases_t916: Vec::new(),
         };
@@ -197,6 +234,8 @@ impl DictEntry {
             alt: Vec::new(),
             seq_t912: String::new(),
             seq_t916: String::new(),
+            norm_key: String::new(),
+            base_q: 0,
             aliases: Vec::new(),
             aliases_t916: Vec::new(),
         };
@@ -217,7 +256,7 @@ impl DictEntry {
         if seq.is_empty() {
             return None;
         }
-        Some(Self {
+        let mut e = Self {
             word,
             seq,
             freq,
@@ -230,9 +269,13 @@ impl DictEntry {
             alt: Vec::new(),
             seq_t912: String::new(),
             seq_t916: String::new(),
+            norm_key: String::new(),
+            base_q: 0,
             aliases: Vec::new(),
             aliases_t916: Vec::new(),
-        })
+        };
+        e.ensure_cached();
+        Some(e)
     }
 
     /// Fill empty precomputed seqs (legacy rows). Non-explicit rows
@@ -241,6 +284,7 @@ impl DictEntry {
     /// do not encode under a pad keep the canonical `seq` at match time
     /// (same fallback the old per-keystroke `encode_word` path used).
     pub fn ensure_precomputed(&mut self) {
+        self.ensure_cached();
         if self.explicit {
             return;
         }
@@ -357,6 +401,24 @@ impl DictEntry {
     }
 }
 
+/// One unioned suggest candidate (module scope so the merge helpers can
+/// name it): deduped on the row's precomputed `norm_key`, frequencies
+/// summed, display from the highest-priority row, best keyfit.
+struct MergedRow {
+    word: String,
+    seq: String,
+    freq_base: u64,
+    cat: String,
+    lang: String,
+    priority: i32,
+    keyfit: f64,
+    /// Static rows merged into this candidate (0 = personal-only).
+    contributors: u32,
+    /// `base_q` of the sole contributor (valid iff `contributors == 1`):
+    /// the quantized `log10` skip.
+    single_q: u16,
+}
+
 /// Scored candidate returned to the UI / UniFFI.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Suggestion {
@@ -378,6 +440,14 @@ pub struct DictionaryStack {
     /// search). Built from the precomputed per-layout seqs at insert
     /// time; every layout present in [`PRECOMPUTED_LAYOUTS`] gets one.
     fst_by_layout: HashMap<String, fst::Set<Vec<u8>>>,
+    /// Per-layout `seq -> row-index` posting lists over the same key space
+    /// as the FST (primary + match-any aliases). Rows are `u32` indexes
+    /// into `base ++ extensions`, appended in row order so every posting
+    /// list is ascending — merging in index order reproduces the legacy
+    /// scan's first-wins display exactly. Rebuilt with the FST at insert;
+    /// backs exact-HashMap, generative-neighbor, and automaton-prefix
+    /// lookups (plan/05 #1-2).
+    seq_postings: HashMap<String, HashMap<String, Vec<u32>>>,
     /// FST build failures by layout (insert sets are sorted+deduped so
     /// this is only populated on genuine `fst` errors; surfaced via
     /// [`Self::fst_build_error`] instead of a silent missing index).
@@ -392,6 +462,7 @@ impl DictionaryStack {
             personal: PersonalDict::new(),
             weights: RankWeights::default(),
             fst_by_layout: HashMap::new(),
+            seq_postings: HashMap::new(),
             fst_errors: HashMap::new(),
         };
         s.ensure_precomputed_all();
@@ -406,6 +477,7 @@ impl DictionaryStack {
             personal: PersonalDict::new(),
             weights,
             fst_by_layout: HashMap::new(),
+            seq_postings: HashMap::new(),
             fst_errors: HashMap::new(),
         };
         s.ensure_precomputed_all();
@@ -531,12 +603,35 @@ impl DictionaryStack {
         Ok(out)
     }
 
+    /// Row behind a posting-list index (`base ++ extensions` order).
+    /// Panics with context on a corrupt index instead of returning a
+    /// wrong row: postings are rebuilt from these same vecs, so a miss
+    /// here is a bug, never user input.
+    fn row(&self, idx: u32) -> &DictEntry {
+        let nb = self.base.len() as u32;
+        if idx < nb {
+            self.base.get(idx as usize).unwrap_or_else(|| {
+                panic!("DictionaryStack::row: base index {idx} out of range (base len {})", self.base.len())
+            })
+        } else {
+            self.extensions.get((idx - nb) as usize).unwrap_or_else(|| {
+                panic!(
+                    "DictionaryStack::row: extension index {} out of range (extensions len {})",
+                    idx - nb,
+                    self.extensions.len()
+                )
+            })
+        }
+    }
+
     /// Rebuild the per-layout FST sequence indexes (keys inserted sorted).
     /// Indexes cover primary seqs plus match-any aliases, so variant
     /// spellings and the Devanagari skeleton fallback decode too.
+    /// Posting lists cover the identical key space in row order.
     fn rebuild_index(&mut self) {
         self.fst_by_layout.clear();
         self.fst_errors.clear();
+        self.seq_postings.clear();
         for layout in PRECOMPUTED_LAYOUTS {
             let mut seqs: Vec<&str> = self
                 .base
@@ -572,6 +667,7 @@ impl DictionaryStack {
                             (*layout).to_string(),
                             format!("DictionaryStack::rebuild_index: fst load for layout {layout:?} failed: {e}"),
                         );
+                        continue;
                     }
                 },
                 Err(e) => {
@@ -579,8 +675,30 @@ impl DictionaryStack {
                         (*layout).to_string(),
                         format!("DictionaryStack::rebuild_index: fst finish for layout {layout:?} failed: {e}"),
                     );
+                    continue;
                 }
             }
+            // Posting lists over the identical key space, in row order
+            // (ascending indexes => legacy-scan-order merge). A row
+            // contributes once per distinct seq even when primary and an
+            // alias coincide (dedup within the row, never across rows).
+            let mut map: HashMap<String, Vec<u32>> = HashMap::new();
+            for (idx, e) in self.base.iter().chain(self.extensions.iter()).enumerate() {
+                let idx = idx as u32;
+                let mut seen_primary = false;
+                let primary = e.seq_for_layout(layout);
+                if !primary.is_empty() {
+                    map.entry(primary.to_string()).or_default().push(idx);
+                    seen_primary = true;
+                }
+                for a in e.aliases_for_layout(layout) {
+                    if a.is_empty() || (seen_primary && a.as_str() == primary) {
+                        continue;
+                    }
+                    map.entry(a.clone()).or_default().push(idx);
+                }
+            }
+            self.seq_postings.insert((*layout).to_string(), map);
         }
     }
 
@@ -589,20 +707,22 @@ impl DictionaryStack {
         self.decode_prefix_for_id(prefix, "t9-9", limit)
     }
 
+    /// FST `StartsWith` automaton query (plan/05 #1): the automaton seeks
+    /// to the prefix range instead of linearly scanning the whole set.
+    /// Yields lexicographic order, identical to the old linear filter.
     fn decode_prefix_for_id(&self, prefix: &str, layout_id: &str, limit: usize) -> Vec<String> {
         let Some(set) = self.fst_by_layout.get(layout_id) else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        let mut stream = set.stream();
-        use fst::Streamer;
+        let auto = fst::automaton::Str::new(prefix).starts_with();
+        let mut stream = set.search(auto).into_stream();
+        use fst::{Automaton, IntoStreamer, Streamer};
         while let Some(k) = stream.next() {
             if let Ok(s) = std::str::from_utf8(k) {
-                if s.starts_with(prefix) {
-                    out.push(s.to_string());
-                    if out.len() >= limit {
-                        break;
-                    }
+                out.push(s.to_string());
+                if out.len() >= limit {
+                    break;
                 }
             }
         }
@@ -681,8 +801,12 @@ impl DictionaryStack {
         limit: usize,
         now: i64,
     ) -> Vec<Suggestion> {
-        // Frozen t9-9 path: precomputed canonical seqs, global neighbor
-        // graph, digits only.
+        // Frozen t9-9 path: precomputed canonical seqs, digits only. The
+        // mapping feeds neighbor generation + personal encoding; its
+        // behavior is parity-locked with the frozen free functions
+        // (`t9_parity_with_mapping`), so the indexed path matches the old
+        // scan exactly.
+        let mapping = LayoutRegistry::builtins_cached().get_or_default(DEFAULT_LAYOUT_ID);
         self.suggest_inner(
             ctx,
             digits,
@@ -695,6 +819,8 @@ impl DictionaryStack {
                     Cow::Borrowed(e.aliases_for_layout(DEFAULT_LAYOUT_ID)),
                 )
             },
+            mapping,
+            true,
             &is_one_edit_neighbor,
             &|c| c.is_ascii_digit(),
             now,
@@ -722,6 +848,7 @@ impl DictionaryStack {
         limit: usize,
         now: i64,
     ) -> Vec<Suggestion> {
+        let mapping = LayoutRegistry::builtins_cached().get_or_default(DEFAULT_LAYOUT_ID);
         self.suggest_inner(
             ctx,
             digits,
@@ -734,6 +861,8 @@ impl DictionaryStack {
                     Cow::Borrowed(e.aliases_for_layout(DEFAULT_LAYOUT_ID)),
                 )
             },
+            mapping,
+            false,
             &|_, _| false,
             &|c| c.is_ascii_digit(),
             now,
@@ -783,6 +912,8 @@ impl DictionaryStack {
                         Cow::Borrowed(e.aliases_for_layout(layout_id)),
                     )
                 },
+                mapping,
+                true,
                 &|a, b| mapping.is_one_edit_neighbor(a, b),
                 &|c| mapping.contains_code(c),
                 now,
@@ -798,6 +929,8 @@ impl DictionaryStack {
                     let (primary, aliases) = e.custom_seqs(mapping);
                     (Cow::Owned(primary), Cow::Owned(aliases))
                 },
+                mapping,
+                true,
                 &|a, b| mapping.is_one_edit_neighbor(a, b),
                 &|c| mapping.contains_code(c),
                 now,
@@ -829,6 +962,8 @@ impl DictionaryStack {
                         Cow::Borrowed(e.aliases_for_layout(layout_id)),
                     )
                 },
+                mapping,
+                false,
                 &|_, _| false,
                 &|c| mapping.contains_code(c),
                 now,
@@ -844,6 +979,8 @@ impl DictionaryStack {
                     let (primary, aliases) = e.custom_seqs(mapping);
                     (Cow::Owned(primary), Cow::Owned(aliases))
                 },
+                mapping,
+                false,
                 &|_, _| false,
                 &|c| mapping.contains_code(c),
                 now,
@@ -860,6 +997,8 @@ impl DictionaryStack {
         limit: usize,
         layout_id: &str,
         seqs_of: &dyn Fn(&DictEntry) -> (Cow<'_, str>, Cow<'_, [String]>),
+        mapping: &dyn KeyMapping,
+        neighbor_on: bool,
         is_neighbor_edit: &dyn Fn(&str, &str) -> bool,
         is_code: &dyn Fn(char) -> bool,
         now: i64,
@@ -869,23 +1008,13 @@ impl DictionaryStack {
         }
         let prev = ctx.split_whitespace().last().unwrap_or("").to_lowercase();
 
-        struct Merged {
-            word: String,
-            seq: String,
-            freq_base: u64,
-            cat: String,
-            lang: String,
-            priority: i32,
-            keyfit: f64,
-        }
-
         // Union across base + extensions, keyed by (norm word, lang).
         // Each row matches match-any over its (primary, aliases) seqs;
         // keyfit is the best across them. Alias ROWS (same word, distinct
         // seqs in separate rows) merge into one candidate instead of
         // collapsing to the first seq: frequencies sum, display follows
         // the highest-priority row, keyfit takes the max.
-        let mut merged: HashMap<String, Merged> = HashMap::new();
+        let mut merged: HashMap<String, MergedRow> = HashMap::new();
         let keyfit_of = |eseq: &str| -> Option<f64> {
             if eseq == digits {
                 Some(1.0)
@@ -910,38 +1039,23 @@ impl DictionaryStack {
             }
             best
         };
-        for e in self.base.iter().chain(self.extensions.iter()) {
-            let (primary, aliases) = seqs_of(e);
-            let Some(keyfit) = keyfit_any(&primary, &aliases) else {
-                continue;
-            };
-            let norm = format!("{}\x1f{}", e.word.to_lowercase(), e.lang);
-            match merged.get_mut(&norm) {
-                Some(m) => {
-                    m.freq_base += e.freq;
-                    if e.priority > m.priority {
-                        m.cat = e.cat.clone();
-                        m.word = e.word.clone();
-                        m.priority = e.priority;
-                    }
-                    if keyfit > m.keyfit {
-                        m.keyfit = keyfit;
-                    }
-                }
-                None => {
-                    merged.insert(
-                        norm,
-                        Merged {
-                            word: e.word.clone(),
-                            seq: primary.into_owned(),
-                            freq_base: e.freq,
-                            cat: e.cat.clone(),
-                            lang: e.lang.clone(),
-                            priority: e.priority,
-                            keyfit,
-                        },
-                    );
-                }
+        if PRECOMPUTED_LAYOUTS.contains(&layout_id) && self.seq_postings.contains_key(layout_id) {
+            // Indexed path (plan/05 #1-2): exact posting lookup + FST
+            // `StartsWith` prefix page + generative neighbor expansion.
+            // Same match-any semantics as the scan below (best keyfit
+            // across primary + aliases), merged in ascending row order so
+            // first-wins display is identical.
+            self.merge_indexed(digits, layout_id, mapping, neighbor_on, &mut merged);
+        } else {
+            // Legacy per-entry scan: custom layouts with no index, or a
+            // layout whose FST failed to build (explicit error via
+            // `fst_build_error`, never a silent wrong-layout scan).
+            for e in self.base.iter().chain(self.extensions.iter()) {
+                let (primary, aliases) = seqs_of(e);
+                let Some(keyfit) = keyfit_any(&primary, &aliases) else {
+                    continue;
+                };
+                Self::merge_row(&mut merged, e, primary.into_owned(), keyfit);
             }
         }
 
@@ -949,36 +1063,33 @@ impl DictionaryStack {
         // OOV commits) participate through the same pipeline. Entries whose
         // (norm, lang) collides with a static candidate merge (keyfit max,
         // never a duplicate row); the personal overlay below still supplies
-        // freq_personal / recency / bigram. Encoding reuses one buffer for
-        // the whole loop (no per-entry `String` alloc beyond the stored
-        // `word` clone on match).
+        // freq_personal / recency / bigram. Encoding goes straight through
+        // `mapping` into one reused buffer — no per-entry tmp `DictEntry`,
+        // no `seq_of` closure alloc. Personal rows carry no tr/alt, so the
+        // match set is just (primary). The empty-falls-back-to-canonical
+        // rule matches the old `custom_seqs`/precompute paths: a word
+        // unencodable under the layout falls back to the frozen t9-9
+        // skeleton, and only a word unencodable under both is skipped.
         let mut enc_buf = String::new();
         for p in self.personal.live_entries() {
-            // Frozen t9-9 path reads `seq` verbatim, so pre-encode with the
-            // default T9 mapping; per-layout paths use the precomputed seq
-            // for their own layout (filled below into the loop buffer).
-            let mut tmp = DictEntry {
-                word: p.word.clone(),
-                seq: encode_word(&p.word),
-                freq: 0,
-                cat: p.category.clone(),
-                lang: p.lang.clone(),
-                priority: 100,
-                explicit: false,
-                layout_id: None,
-                tr: None,
-                alt: Vec::new(),
-                aliases: Vec::new(),
-                aliases_t916: Vec::new(),
-                seq_t912: String::new(),
-                seq_t916: String::new(),
-            };
-            if tmp.seq.is_empty() && layout_id == DEFAULT_LAYOUT_ID {
-                continue;
+            mapping.encode_word_into(&p.word, &mut enc_buf);
+            if enc_buf.is_empty() {
+                enc_buf.push_str(&encode_word(&p.word));
+                if enc_buf.is_empty() {
+                    continue;
+                }
             }
-            tmp.precompute_for(layout_id, &mut enc_buf);
-            let (primary, aliases) = seqs_of(&tmp);
-            let Some(keyfit) = keyfit_any(&primary, &aliases) else {
+            let primary = enc_buf.as_str();
+            let keyfit = if primary == digits {
+                1.0
+            } else if primary.starts_with(digits) {
+                0.9
+            } else if neighbor_on
+                && primary.len() == digits.len()
+                && mapping.is_one_edit_neighbor(digits, primary)
+            {
+                0.6
+            } else {
                 continue;
             };
             let norm = format!("{}\x1f{}", p.word.to_lowercase(), p.lang);
@@ -991,9 +1102,9 @@ impl DictionaryStack {
                 None => {
                     merged.insert(
                         norm,
-                        Merged {
+                        MergedRow {
                             word: p.word.clone(),
-                            seq: primary.into_owned(),
+                            seq: primary.to_string(),
                             freq_base: 0,
                             cat: if p.category.is_empty() {
                                 "personal".to_string()
@@ -1003,6 +1114,8 @@ impl DictionaryStack {
                             lang: p.lang.clone(),
                             priority: 100,
                             keyfit,
+                            contributors: 0,
+                            single_q: 0,
                         },
                     );
                 }
@@ -1023,7 +1136,7 @@ impl DictionaryStack {
         // iteration), so sorting by `freq_base` alone lets equal-freq ties
         // resolve to a different 200-set on every call. (freq desc, word
         // asc, lang asc) is total over the dedupe key space.
-        let mut items: Vec<Merged> = merged.into_values().collect();
+        let mut items: Vec<MergedRow> = merged.into_values().collect();
         items.sort_by(|a, b| {
             b.freq_base
                 .cmp(&a.freq_base)
@@ -1060,7 +1173,17 @@ impl DictionaryStack {
                 accepts: acc,
                 rejects: rej,
             };
-            let score = score_candidate(&input, &self.weights);
+            // Quantized fast path (plan/05 #7): a single static row with no
+            // personal overlay scores its load-time fixed-point base term
+            // (no per-keystroke `log10`). Merges and personal-boosted rows
+            // take the exact log. Both are load/personal-state functions,
+            // so repeats stay byte-identical.
+            let base = if m.contributors == 1 && freq_personal == 0 {
+                dequantize_base(m.single_q)
+            } else {
+                base_term(m.freq_base, freq_personal)
+            };
+            let score = score_candidate_with_base(&input, &self.weights, base);
             debug_assert!(
                 !score.is_nan(),
                 "suggest: score must never be NaN for {:?} (inputs cannot NaN: log10(>=1), bounded exp)",
@@ -1079,7 +1202,13 @@ impl DictionaryStack {
             });
         }
 
-        scored.sort_by(|a, b| {
+        // Real top-N heap (plan/05 #3): `select_nth_unstable` partitions the
+        // top `limit` in O(n) instead of fully sorting, then only the
+        // survivors sort. Total-order comparator (score desc, len,
+        // lexicographic, priority, lang) keeps every tie deterministic;
+        // the input order is already total (freq desc, word, lang), so the
+        // partition itself is repeat-stable.
+        let mut scored_cmp = |a: &Scored, b: &Scored| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -1087,8 +1216,12 @@ impl DictionaryStack {
                 .then_with(|| a.word.cmp(&b.word))
                 .then_with(|| b.priority.cmp(&a.priority))
                 .then_with(|| a.lang.cmp(&b.lang))
-        });
-        scored.truncate(limit);
+        };
+        if scored.len() > limit {
+            scored.select_nth_unstable_by(limit, &mut scored_cmp);
+            scored.truncate(limit);
+        }
+        scored.sort_by(scored_cmp);
         scored
             .into_iter()
             .map(|s| Suggestion {
@@ -1099,6 +1232,113 @@ impl DictionaryStack {
                 layout_id: layout_id.to_string(),
             })
             .collect()
+    }
+
+    /// Fold one static row into the suggest union keyed by the row's
+    /// precomputed `norm_key` (no `format!`/`to_lowercase` per match).
+    /// Frequencies sum, display follows the highest-priority row (ties keep
+    /// the first row in scan/index order — both are row order, so the
+    /// outcome is identical), keyfit takes the max.
+    fn merge_row(merged: &mut HashMap<String, MergedRow>, e: &DictEntry, seq: String, keyfit: f64) {
+        match merged.get_mut(&e.norm_key) {
+            Some(m) => {
+                m.freq_base += e.freq;
+                m.contributors += 1;
+                if e.priority > m.priority {
+                    m.cat = e.cat.clone();
+                    m.word = e.word.clone();
+                    m.priority = e.priority;
+                }
+                if keyfit > m.keyfit {
+                    m.keyfit = keyfit;
+                }
+            }
+            None => {
+                merged.insert(
+                    e.norm_key.clone(),
+                    MergedRow {
+                        word: e.word.clone(),
+                        seq,
+                        freq_base: e.freq,
+                        cat: e.cat.clone(),
+                        lang: e.lang.clone(),
+                        priority: e.priority,
+                        keyfit,
+                        contributors: 1,
+                        single_q: e.base_q,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Indexed match (plan/05 #1-2): exact posting-list lookup + FST
+    /// `StartsWith` prefix page + generative 1-edit neighbor expansion
+    /// (`len x neighbor_codes` exact lookups, ~50 for 7-digit input).
+    /// Per-row best keyfit merges in ascending row order, reproducing the
+    /// legacy scan's first-wins display exactly. `neighbor_on == false`
+    /// skips generation (the gate's precision arm).
+    fn merge_indexed(
+        &self,
+        digits: &str,
+        layout_id: &str,
+        mapping: &dyn KeyMapping,
+        neighbor_on: bool,
+        merged: &mut HashMap<String, MergedRow>,
+    ) {
+        let postings = self.seq_postings.get(layout_id).unwrap_or_else(|| {
+            panic!(
+                "DictionaryStack::merge_indexed: no posting index for layout {layout_id:?} \
+                 (guard with seq_postings.contains_key)"
+            )
+        });
+        // (row, best keyfit): exact 1.0, prefix 0.9, neighbor 0.6.
+        let mut hits: HashMap<u32, f64> = HashMap::new();
+        if let Some(rows) = postings.get(digits) {
+            for &r in rows {
+                hits.insert(r, 1.0);
+            }
+        }
+        if let Some(set) = self.fst_by_layout.get(layout_id) {
+            let auto = fst::automaton::Str::new(digits).starts_with();
+            let mut stream = set.search(auto).into_stream();
+            use fst::{Automaton, IntoStreamer, Streamer};
+            while let Some(k) = stream.next() {
+                if let Ok(s) = std::str::from_utf8(k) {
+                    if s == digits {
+                        continue;
+                    }
+                    if let Some(rows) = postings.get(s) {
+                        for &r in rows {
+                            hits.entry(r).or_insert(0.9);
+                        }
+                    }
+                }
+            }
+        }
+        if neighbor_on {
+            let mut variant = String::with_capacity(digits.len() + 1);
+            for (i, c) in digits.char_indices() {
+                for nc in mapping.neighbor_codes(c) {
+                    variant.clear();
+                    variant.push_str(digits);
+                    let mut nb = [0u8; 4];
+                    variant.replace_range(i..i + c.len_utf8(), nc.encode_utf8(&mut nb));
+                    if let Some(rows) = postings.get(variant.as_str()) {
+                        for &r in rows {
+                            hits.entry(r).and_modify(|k| *k = (*k).max(0.6)).or_insert(0.6);
+                        }
+                    }
+                }
+            }
+        }
+        let mut idxs: Vec<u32> = hits.keys().copied().collect();
+        idxs.sort_unstable();
+        for idx in idxs {
+            let keyfit = hits[&idx];
+            let e = self.row(idx);
+            Self::merge_row(merged, e, e.seq_for_layout(layout_id).to_string(), keyfit);
+        }
     }
 
     /// Dictionary placement info for long-press popup:
