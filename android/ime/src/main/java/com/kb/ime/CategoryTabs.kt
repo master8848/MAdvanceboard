@@ -2,6 +2,7 @@ package com.kb.ime
 
 import android.os.SystemClock
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.PrimaryScrollableTabRow
@@ -47,11 +48,18 @@ fun CategoryTabs(
     onSelect: (Int) -> Unit = {},
     onExpandAll: () -> Unit = {},
     onSwipe: (fromIndex: Int, toIndex: Int) -> Unit = { _, _ -> },
+    /**
+     * Long-press on a tab (plan/08): opens the placement popup for that
+     * category (pack record + move up/down + enable/disable). Taps still
+     * reach [Tab.onClick]: the detector below only handles long-press
+     * (no `onTap`, so up-events pass through unconsumed).
+     */
+    onTabLongPress: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current.density
-    // Fresh values for the pointer-input closure without restarting the
-    // detector mid-swipe when selection changes.
+    // Fresh long-press sink without restarting detectors on recompose.
+    val latestOnTabLongPress by rememberUpdatedState(onTabLongPress)
     val latestSelected by rememberUpdatedState(selected)
     val latestOnSelect by rememberUpdatedState(onSelect)
     val latestOnSwipe by rememberUpdatedState(onSwipe)
@@ -98,7 +106,12 @@ fun CategoryTabs(
                 Tab(
                     selected = index == selected,
                     onClick = { onSelect(index) },
-                    text = { Text(cat) }
+                    text = { Text(cat) },
+                    modifier = Modifier.pointerInput(cat) {
+                        detectTapGestures(
+                            onLongPress = { latestOnTabLongPress(cat) }
+                        )
+                    }
                 )
             }
         }

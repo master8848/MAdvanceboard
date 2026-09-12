@@ -127,6 +127,13 @@ class KbInputMethodService : InputMethodService() {
     private var undoAvailable by mutableStateOf(false)
     private var symbolsOptions by mutableStateOf(emptyList<String>())
     private var symbolsTitle by mutableStateOf("")
+    /**
+     * Long-press placement popup (plan/08): null = hidden. The info text
+     * always carries the explicit engine-availability notes (live
+     * `placement()` / `set_cat_enabled` are not UniFFI-exported — see
+     * [StackEngineCaps]), so the popup never implies a live reorder.
+     */
+    private var placementPopup by mutableStateOf<PlacementState?>(null)
     private var undoText: String = ""
     private var lastCommitWord: String? = null
     private var lastCommitTs: Long = 0L
@@ -212,13 +219,7 @@ class KbInputMethodService : InputMethodService() {
         activeSpec = loadLayoutSpec(this, activeLayoutId)
         reloadGesturePrefs()
         flingsAllowedAT = AccessibilityGates.evaluate(this).flingsAllowed
-        liveTabs = try {
-            CustomPackValidation.resolveTabs(CustomPackStore.enabledIds(this))
-        } catch (e: Exception) {
-            android.util.Log.e("KbIME", "Custom tabs unreadable, using built-ins", e)
-            gestureError = "Custom categories unreadable: ${e.message}"
-            DEFAULT_CATEGORIES
-        }
+        refreshTabs()
         // Warm category learn-flags + native-lib probe off the main thread.
         serviceScope.launch {
             val ids = try {
@@ -335,35 +336,57 @@ class KbInputMethodService : InputMethodService() {
      * Extension pack envelopes (`assets/categories/<id>.json`, `words`
      * embedded by `scripts/sync_android_assets.py`) as
      * `(packJson, priority)` for `PredictorFactory.create`, PLUS enabled
-     * user custom packs ([CustomPackStore]) in stack order. A missing
-     * asset throws loudly — the factory turns it into a degraded engine
-     * WITH the cause (status line), never a half-loaded stack. Rust-side
-     * `add_pack_json` parses these envelopes as `PackFile` (extra manifest
-     * fields ignored); a malformed pack or unknown layout affinity fails
-     * the whole factory decision the same loud way. A corrupt custom pack
-     * fails the same way WITH its id (Settings validates at save, so this
-     * is defense-in-depth, not the primary check).
+     * user custom packs ([CustomPackStore]) in stack order.
+     *
+     * Plan/08 ordering: stored priorities ([PackOrderStore]) override the
+     * compiled defaults and disabled packs are SKIPPED (the engine has no
+     * live `set_cat_enabled` FFI — see [StackEngineCaps] — so enable state
+     * applies at init). The whole list installs priority-desc, id-asc, so
+     * on-device tie-breaks match the settings strip exactly. A missing
+     * asset or an out-of-range custom priority throws loudly — the factory
+     * turns it into a degraded engine WITH the cause (status line), never
+     * a half-loaded stack. Rust-side `add_pack_json` parses these
+     * envelopes as `PackFile` (extra manifest fields ignored); a malformed
+     * pack or unknown layout affinity fails the whole factory decision the
+     * same loud way. A corrupt custom pack fails the same way WITH its id
+     * (Settings validates at save, so this is defense-in-depth, not the
+     * primary check).
      */
-    private fun loadExtensionPacks(): List<Pair<String, Int>> =
-        EXTENSION_PACK_ASSETS.map { (path, priority) ->
-            val text = try {
-                assets.open(path).bufferedReader().use { it.readText() }
-            } catch (e: Exception) {
-                throw IllegalStateException("IME asset missing: $path (${e.message})")
+    private fun loadExtensionPacks(): List<Pair<String, Int>> {
+        val prios = PackOrderStore.priorityMap(this)
+        val enabled = PackOrderStore.enabledMap(this)
+        val staged = mutableListOf<Triple<String, Int, String>>()
+        for ((path, defaultPrio) in EXTENSION_PACK_ASSETS) {
+            val id = path.substringAfterLast("/").removeSuffix(".json")
+            val priority = prios[id] ?: defaultPrio
+            if (enabled[id] != false) {
+                val text = try {
+                    assets.open(path).bufferedReader().use { it.readText() }
+                } catch (e: Exception) {
+                    throw IllegalStateException("IME asset missing: $path (${e.message})")
+                }
+                staged.add(Triple(text, priority, id))
             }
-            text to priority
-        } + try {
-            CustomPackStore.enabledPacks(this).map { pack ->
+        }
+        try {
+            for (pack in CustomPackStore.enabledPacks(this)) {
                 if (pack.packJson.isBlank()) {
                     throw IllegalStateException("Custom pack \"${pack.id}\": envelope empty")
                 }
-                pack.packJson to pack.priority
+                DictStackOrder.validatePriority(pack.priority)?.let {
+                    throw IllegalStateException("Custom pack \"${pack.id}\": $it")
+                }
+                staged.add(Triple(pack.packJson, pack.priority, pack.id))
             }
         } catch (e: IllegalStateException) {
             throw e
         } catch (e: Exception) {
             throw IllegalStateException("Custom packs unreadable (${e.message})")
         }
+        return staged
+            .sortedWith(compareByDescending<Triple<String, Int, String>> { it.second }.thenBy { it.third })
+            .map { it.first to it.second }
+    }
 
     /**
      * Reloads Gesture Tuning prefs (thresholds + 12-key opt-in). Called from
@@ -399,6 +422,12 @@ class KbInputMethodService : InputMethodService() {
                         refreshPad(root)
                     },
                     onCategoryChanged = { onCategoryChanged(it) },
+                    onTabLongPress = { onTabLongPress(it) },
+                    placement = placementPopup,
+                    onPlacementMoveUp = { onPlacementMove(-1) },
+                    onPlacementMoveDown = { onPlacementMove(1) },
+                    onPlacementToggle = { onPlacementToggle() },
+                    onPlacementDismiss = { onPlacementDismiss() },
                     activeLayoutId = liveLayoutId,
                     activeTabLabel = liveTabLabel,
                     onLayoutChanged = { setTabLayout(it) },
@@ -481,11 +510,28 @@ class KbInputMethodService : InputMethodService() {
         // next init — a restart applies ranking for freshly added packs).
         val resolved = LayoutStore.layoutForCat(this, activeAssetId)
         if (resolved != activeLayoutId) setPadLayout(resolved)
+        // Settings → dict-stack order (plan/08): new/enabled/disabled tabs
+        // appear without killing the IME; the engine itself picks up
+        // priority/enable changes on its next init (a restart applies them
+        // to ranking — live reorder is not UniFFI-exported, see
+        // [StackEngineCaps]).
+        refreshTabs()
+    }
+
+    /**
+     * Re-resolve the visible tab strip from the persisted stack order
+     * (plan/08): numbers pinned first, base words/ne, enabled movable
+     * packs in priority order, ★personal pinned last. A corrupt store
+     * keeps the built-in strip and names the cause on the status line
+     * instead of breaking the keyboard.
+     */
+    private fun refreshTabs() {
         liveTabs = try {
-            CustomPackValidation.resolveTabs(CustomPackStore.enabledIds(this))
+            DictStackOrder.stripOrder(DictStackOrder.assembleSlots(this))
         } catch (e: Exception) {
-            android.util.Log.e("KbIME", "Custom tabs unreadable, keeping current strip", e)
-            liveTabs
+            android.util.Log.e("KbIME", "Stack order unreadable, using built-ins", e)
+            gestureError = "Dictionary stack order unreadable: ${e.message}"
+            DEFAULT_CATEGORIES
         }
     }
 
@@ -1288,13 +1334,7 @@ class KbInputMethodService : InputMethodService() {
     }
 
     internal fun onCategoryChanged(tabLabel: String) {
-        activeAssetId = when (tabLabel) {
-            "EN" -> "words"
-            "NE" -> "ne"
-            "nepali" -> "ne" // legacy manifest id (renamed to `ne`)
-            "★personal" -> "personal"
-            else -> tabLabel.lowercase()
-        }
+        activeAssetId = canonicalTabId(tabLabel)
         liveTabLabel = activeAssetId
         // Snippet buffer dies on tab switch (plan 12:62): helpers belong to
         // one tab's document scratch — switching to EN hides the js strip,
@@ -1330,6 +1370,152 @@ class KbInputMethodService : InputMethodService() {
         // New tab's static palette (html skeletons, math flat tokens) shows
         // immediately; buffer follow-tokens are gone (cleared above).
         refreshSnippetStrip()
+    }
+
+    /**
+     * Canonical asset id for a tab label (legacy display labels `EN`/`NE`
+     * still map). Shared by tap select and long-press placement so both
+     * resolve identically.
+     */
+    internal fun canonicalTabId(tabLabel: String): String = when (tabLabel) {
+        "EN" -> "words"
+        "NE" -> "ne"
+        "nepali" -> "ne" // legacy manifest id (renamed to `ne`)
+        "★personal" -> "personal"
+        else -> tabLabel.lowercase()
+    }
+
+    /**
+     * Long-press on a tab (plan/08): opens the placement popup for that
+     * category — pack record (id, priority, enabled, learn + layout
+     * badges) with move up/down + enable/disable for movable packs.
+     *
+     * The live engine `placement(word)` API (`core-rust/src/stack.rs`)
+     * answers per-WORD provenance (`packId • freq • accepts`) but is not
+     * UniFFI-exported ([StackEngineCaps.placementExported] == false), so
+     * the popup shows the pack record with [StackEngineCaps.placementError]
+     * attached — per-word provenance stays explicitly unavailable, never
+     * a plausible-looking fabrication.
+     */
+    internal fun onTabLongPress(tabLabel: String) {
+        val id = canonicalTabId(tabLabel)
+        val slots = try {
+            DictStackOrder.assembleSlots(this)
+        } catch (e: Exception) {
+            placementPopup = PlacementState(
+                tab = tabLabel,
+                info = "Stack record unreadable: ${e.message}"
+            )
+            gestureLog.record("tabs", "long-press", "placement-unreadable", tabLabel)
+            return
+        }
+        val slot = slots.find { it.id == id }
+        if (slot == null) {
+            placementPopup = PlacementState(
+                tab = tabLabel,
+                info = "Unknown category \"$tabLabel\" (not in the installed stack)."
+            )
+            gestureLog.record("tabs", "long-press", "placement-unknown", tabLabel)
+            return
+        }
+        placementPopup = placementFor(slot, slots, note = null)
+        gestureLog.record("tabs", "long-press", "placement-open", id)
+    }
+
+    /** Rebuild the popup for [slot] (move/toggle targets re-resolve order). */
+    private fun placementFor(slot: StackSlot, slots: List<StackSlot>, note: String?): PlacementState {
+        val movable = DictStackOrder.sortMovable(slots)
+        val rank = movable.indexOfFirst { it.id == slot.id }
+        val record = buildString {
+            append("pack ${slot.id} • prio ${slot.priority} • ")
+            append(if (slot.enabled) "enabled" else "disabled")
+            append(" • ${if (slot.learns) "learns" else "no-learn"}")
+            slot.layoutId?.let { append(" • layout $it") }
+            if (slot.fixed) append(" • fixed pin")
+            if (slot.custom) append(" • custom")
+        }
+        val info = buildString {
+            append(record)
+            append("\n")
+            append(StackEngineCaps.placementError())
+            if (note != null) {
+                append("\n")
+                append(note)
+            }
+        }
+        return PlacementState(
+            tab = slot.id,
+            info = info,
+            canMoveUp = !slot.fixed && rank > 0,
+            canMoveDown = !slot.fixed && rank >= 0 && rank < movable.size - 1,
+            enabled = slot.enabled,
+            movable = !slot.fixed
+        )
+    }
+
+    /** Persist a stack reorder from the placement popup (move ±1). */
+    internal fun onPlacementMove(delta: Int) {
+        val current = placementPopup ?: run {
+            reportGestureError("Placement popup closed: move ignored")
+            return
+        }
+        try {
+            val slots = DictStackOrder.assembleSlots(this)
+            val order = DictStackOrder.sortMovable(slots).map { it.id }
+            val moved = DictStackOrder.moveOrder(order, current.tab, delta)
+            val customIds = slots.filter { it.custom }.map { it.id }.toSet()
+            DictStackOrder.persistPriorities(this, DictStackOrder.respace(moved), customIds)
+            refreshTabs()
+            val fresh = DictStackOrder.assembleSlots(this)
+            val slot = fresh.find { it.id == current.tab }
+            placementPopup = if (slot == null) {
+                current.copy(info = current.info + "\nMove saved but \"${current.tab}\" vanished from the stack.")
+            } else {
+                placementFor(
+                    slot, fresh,
+                    note = "Order saved — engine applies it on keyboard restart " +
+                        "(packs reinstall in priority order; live reorder is not " +
+                        "UniFFI-exported)."
+                )
+            }
+            gestureLog.record("tabs", "placement", "move", "${current.tab}:$delta")
+        } catch (e: Exception) {
+            reportGestureError("Placement move failed: ${e.message}")
+        }
+    }
+
+    /** Persist an enable/disable from the placement popup. */
+    internal fun onPlacementToggle() {
+        val current = placementPopup ?: run {
+            reportGestureError("Placement popup closed: toggle ignored")
+            return
+        }
+        try {
+            val slots = DictStackOrder.assembleSlots(this)
+            val slot = slots.find { it.id == current.tab }
+                ?: throw IllegalArgumentException("unknown category \"${current.tab}\"")
+            if (slot.fixed) {
+                throw IllegalArgumentException(
+                    "Fixed pin \"${current.tab}\" cannot be disabled (base 0 / personal 100)."
+                )
+            }
+            val next = !slot.enabled
+            if (slot.custom) CustomPackStore.setEnabled(this, slot.id, next)
+            else PackOrderStore.setEnabled(this, slot.id, next)
+            refreshTabs()
+            val fresh = DictStackOrder.assembleSlots(this)
+            val updated = fresh.find { it.id == current.tab } ?: slot.copy(enabled = next)
+            placementPopup = placementFor(
+                updated, fresh, note = StackEngineCaps.liveToggleError(current.tab)
+            )
+            gestureLog.record("tabs", "placement", "toggle", "${current.tab}:$next")
+        } catch (e: Exception) {
+            reportGestureError("Placement toggle failed: ${e.message}")
+        }
+    }
+
+    internal fun onPlacementDismiss() {
+        placementPopup = null
     }
 
     private fun makePad(): View = if (qwertyFallback) {

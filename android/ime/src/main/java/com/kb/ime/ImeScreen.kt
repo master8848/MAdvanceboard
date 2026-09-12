@@ -32,6 +32,21 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 
 /**
+ * Long-press placement popup state (plan/08): one category's pack record
+ * plus its reorder/toggle affordances. `movable=false` marks the fixed
+ * pins (base 0, personal 100) — info only, no buttons.
+ */
+data class PlacementState(
+    val tab: String,
+    /** Multi-line pack record + explicit engine-availability notes. */
+    val info: String,
+    val canMoveUp: Boolean = false,
+    val canMoveDown: Boolean = false,
+    val enabled: Boolean = true,
+    val movable: Boolean = false
+)
+
+/**
  * Hybrid IME screen: [CategoryTabs] + [SuggestionStrip] + expand-all paged
  * sheet + QWERTY FAB toggle + 9/12/16 pad-size toggle + plan 01 overlays.
  *
@@ -62,6 +77,14 @@ fun ImeScreen(
     onExpandAll: () -> Unit = {},
     onToggleQwerty: () -> Unit = {},
     onCategoryChanged: (String) -> Unit = {},
+    /** Long-press on a tab: host opens the [PlacementState] popup. */
+    onTabLongPress: (String) -> Unit = {},
+    /** Placement popup (null = hidden) + its actions. */
+    placement: PlacementState? = null,
+    onPlacementMoveUp: () -> Unit = {},
+    onPlacementMoveDown: () -> Unit = {},
+    onPlacementToggle: () -> Unit = {},
+    onPlacementDismiss: () -> Unit = {},
     activeLayoutId: String = "t9-9",
     onLayoutChanged: (String) -> Unit = {},
     /** Tab the pad-size toggle applies to (per-tab override caption). */
@@ -109,6 +132,7 @@ fun ImeScreen(
             onSwipe = { from, to ->
                 onFling("tabs", if (to > from) "swipe-left" else "swipe-right", "switch-category")
             },
+            onTabLongPress = onTabLongPress,
             onExpandAll = {
                 expanded = true
                 onExpandAll()
@@ -205,6 +229,15 @@ fun ImeScreen(
                 onClose = { expanded = false }
             )
         }
+        if (placement != null) {
+            PlacementPopup(
+                state = placement,
+                onMoveUp = onPlacementMoveUp,
+                onMoveDown = onPlacementMoveDown,
+                onToggle = onPlacementToggle,
+                onDismiss = onPlacementDismiss
+            )
+        }
         if (symbolsOptions.isNotEmpty()) {
             SymbolsSheet(
                 title = symbolsTitle,
@@ -296,6 +329,58 @@ fun UndoBar(onUndo: () -> Unit, modifier: Modifier = Modifier) {
             style = MaterialTheme.typography.labelMedium
         )
         TextButton(onClick = onUndo) { Text("Undo") }
+    }
+}
+
+/**
+ * Long-press placement popup (plan/08): answers "where is this tab's pack
+ * in the stack" with the pack record (id, priority, enabled, learn +
+ * layout badges) plus move up/down and enable/disable for movable packs.
+ * Fixed pins (base/personal) render info-only. Every engine limitation
+ * arrives inside [PlacementState.info] as an explicit message — the popup
+ * never implies a live engine reorder.
+ */
+@Composable
+fun PlacementPopup(
+    state: PlacementState,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    onToggle: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(modifier = modifier.fillMaxWidth().padding(8.dp)) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "Placement — ${state.tab}",
+                style = MaterialTheme.typography.titleSmall
+            )
+            Text(
+                text = state.info,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+            Row(horizontalArrangement = Arrangement.SpaceBetween) {
+                if (state.movable) {
+                    TextButton(enabled = state.canMoveUp, onClick = onMoveUp) {
+                        Text("Move up")
+                    }
+                    TextButton(enabled = state.canMoveDown, onClick = onMoveDown) {
+                        Text("Move down")
+                    }
+                    TextButton(onClick = onToggle) {
+                        Text(if (state.enabled) "Disable" else "Enable")
+                    }
+                } else {
+                    Text(
+                        text = "Fixed pin — cannot move or disable",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    )
+                }
+                TextButton(onClick = onDismiss) { Text("Close") }
+            }
+        }
     }
 }
 
