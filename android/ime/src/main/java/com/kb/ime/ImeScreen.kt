@@ -70,7 +70,9 @@ fun ImeScreen(
     onFling: (zone: String, gesture: String, action: String) -> Unit = { _, _, _ -> },
     fallbackActionsVisible: Boolean = false,
     fallbackActions: FallbackActions = FallbackActions(),
-    qwertyActive: Boolean = false
+    qwertyActive: Boolean = false,
+    /** Explicit error/status line (gesture failures surface here, never silent). */
+    statusLine: String? = null
 ) {
     val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(1) }
@@ -119,7 +121,16 @@ fun ImeScreen(
             UndoBar(onUndo = onUndo)
         }
         if (fallbackActionsVisible) {
-            FallbackActionBar(actions = fallbackActions)
+            // Next-Category cycles the tab order owned here, then notifies
+            // the host (dict filter + layout resolve follow).
+            FallbackActionBar(
+                actions = fallbackActions.copy(
+                    onNextCategory = {
+                        selectedTab = (selectedTab + 1) % DEFAULT_CATEGORIES.size
+                        onCategoryChanged(DEFAULT_CATEGORIES[selectedTab])
+                    }
+                )
+            )
         }
         // Pad-size toggle: 9/12/16 segmented selector. Category tabs above
         // are unaffected; the host swaps the PadView on selection.
@@ -127,6 +138,14 @@ fun ImeScreen(
             activeLayoutId = activeLayoutId,
             onSelect = onLayoutChanged
         )
+        if (statusLine != null) {
+            Text(
+                text = statusLine,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
+            )
+        }
         if (footerVisible) {
             Row(
                 modifier = Modifier.fillMaxWidth(),

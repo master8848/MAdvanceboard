@@ -3,6 +3,8 @@ package com.kb.ime
 import android.content.Context
 import android.inputmethodservice.InputMethodService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -74,6 +76,49 @@ class KbInputMethodService : InputMethodService() {
     /** Live pad layout id; read by [ImeScreen]'s toggle, written by [setPadLayout]. */
     private var liveLayoutId by mutableStateOf(DEFAULT_LAYOUT_ID)
 
+    // -- Plan 01 gesture state (all read by ImeScreen overlays). --
+    private var gestureThresholds: GestureThresholds = GestureThresholds()
+    private var allowTwelveKeyFlings: Boolean = false
+    private var flingsAllowedAT: Boolean = true
+    private var gestureError by mutableStateOf<String?>(null)
+    private var deletePreviewWords by mutableStateOf(0)
+    private var undoAvailable by mutableStateOf(false)
+    private var symbolsOptions by mutableStateOf(emptyList<String>())
+    private var symbolsTitle by mutableStateOf("")
+    private var undoText: String = ""
+    private var lastCommitWord: String? = null
+    private var lastCommitTs: Long = 0L
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var undoExpiry: Runnable? = null
+    private lateinit var gestureLog: GestureLog
+
+    /** Current (category, layout) gesture policy; recomputed per gesture. */
+    private fun gesturePolicy(): CategoryGesturePolicy =
+        policyForCategory(activeAssetId, activeLayoutId, allowTwelveKeyFlings)
+
+    private fun gateFor(policy: CategoryGesturePolicy): PadGestureDetector.FlingGate =
+        PadGestureDetector.FlingGate(
+            left = policy.flingLeftEnabled,
+            up = policy.flingUpEnabled,
+            right = policy.flingRightEnabled,
+            down = policy.flingDownEnabled
+        )
+
+    private fun effectiveThresholds(): GestureThresholds =
+        if (activeLayoutId == "t9-12" && allowTwelveKeyFlings) {
+            gestureThresholds.scaledForTwelveKey()
+        } else {
+            gestureThresholds
+        }
+
+    private fun reportGestureError(message: String) {
+        gestureError = message
+        try {
+            gestureLog.record("pad", "error", "status", message)
+        } catch (_: Exception) {
+        }
+    }
+
     /** Service-scoped scope for suggest/learn; cancelled in [onDestroy]. */
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -86,10 +131,13 @@ class KbInputMethodService : InputMethodService() {
 
     override fun onCreate() {
         super.onCreate()
+        gestureLog = GestureLog(this, onError = { gestureError = it })
         // Restore the user's persisted pad-size toggle before first inflate.
         activeLayoutId = PadModeStore.load(this)
         liveLayoutId = activeLayoutId
         activeSpec = loadLayoutSpec(this, activeLayoutId)
+        reloadGesturePrefs()
+        flingsAllowedAT = AccessibilityGates.evaluate(this).flingsAllowed
         // Warm category learn-flags + native-lib probe off the main thread.
         serviceScope.launch {
             val ids = try {
@@ -110,6 +158,22 @@ class KbInputMethodService : InputMethodService() {
         }
     }
 
+    /**
+     * Reloads Gesture Tuning prefs (thresholds + 12-key opt-in). Called from
+     * [onCreate] and [onStartInputView] so Tuning changes apply without
+     * killing the IME. Corrupt prefs surface via [gestureError], never
+     * silently: thresholds fall back to ship defaults for this session.
+     */
+    private fun reloadGesturePrefs() {
+        try {
+            gestureThresholds = GestureTuningStore.loadThresholds(this)
+        } catch (e: Exception) {
+            gestureThresholds = GestureThresholds()
+            reportGestureError("Gesture tuning unreadable, using defaults: ${e.message}")
+        }
+        allowTwelveKeyFlings = GestureTuningStore.allowTwelveKeyFlings(this)
+    }
+
     override fun onCreateInputView(): View {
         cachedInputView?.let { return it }
         val root = LinearLayout(this).apply {
@@ -120,14 +184,40 @@ class KbInputMethodService : InputMethodService() {
                 ImeScreen(
                     candidates = liveCandidates,
                     onCandidatePicked = { commitCandidate(it) },
-                    onExpandAll = { /* bottom-sheet host TBD */ },
+                    onExpandAll = { gestureLog.record("bar", "tap-expand", "expand-all") },
                     onToggleQwerty = {
                         qwertyFallback = !qwertyFallback
+                        gestureLog.record("qwerty", "tap-fab", if (qwertyFallback) "show-qwerty" else "show-pad")
                         refreshPad(root)
                     },
                     onCategoryChanged = { onCategoryChanged(it) },
                     activeLayoutId = liveLayoutId,
-                    onLayoutChanged = { setPadLayout(PadModeStore.save(this@KbInputMethodService, it)) }
+                    onLayoutChanged = { setPadLayout(PadModeStore.save(this@KbInputMethodService, it)) },
+                    symbolsOptions = symbolsOptions,
+                    symbolsTitle = symbolsTitle,
+                    onSymbolPick = { onSymbolPick(it) },
+                    onSymbolsDismiss = {
+                        symbolsOptions = emptyList()
+                        symbolsTitle = ""
+                    },
+                    deletePreviewWords = deletePreviewWords,
+                    undoAvailable = undoAvailable,
+                    onUndo = { undoDelete() },
+                    onAcceptFirst = { acceptTopCandidate("strip-button") },
+                    onFling = { zone, gesture, action -> gestureLog.record(zone, gesture, action) },
+                    fallbackActionsVisible = !flingsAllowedAT,
+                    fallbackActions = FallbackActions(
+                        onDelete = { onPadFlingDelete(1) },
+                        onSpace = { onPadSpace() },
+                        onAcceptFirst = { acceptTopCandidate("fallback") },
+                        onToggleQwerty = {
+                            qwertyFallback = !qwertyFallback
+                            refreshPad(root)
+                        },
+                        onSym = { showGenericSymbolsSheet() }
+                    ),
+                    statusLine = gestureError,
+                    qwertyActive = qwertyFallback
                 )
             }
         }
@@ -155,6 +245,11 @@ class KbInputMethodService : InputMethodService() {
         super.onStartInputView(info, restarting)
         // Layout already reflects inputMode via predictionEnabled (raw commit when
         // false). Pad swaps only happen on explicit QWERTY toggle to avoid desync.
+        // Re-read Tuning + AT state so Settings changes apply without IME restart.
+        reloadGesturePrefs()
+        val gate = AccessibilityGates.evaluate(this)
+        flingsAllowedAT = gate.flingsAllowed
+        if (gate.reason != null && !gate.flingsAllowed) gestureError = gate.reason
     }
 
     override fun onFinishInput() {
@@ -242,6 +337,13 @@ class KbInputMethodService : InputMethodService() {
      * Layout-driven pad input. Punctuation-only keys (e.g. t9 `1`) commit
      * their first symbol directly (tap-cycle TBD); all other text codes
      * extend the seq fed to the shared Predictor path with [activeLayoutId].
+     *
+     * Per-category tap deltas (plan 01):
+     * - numbers (no prediction): tap commits the digit raw, no seq.
+     * - emoji: tap appends and immediately commits the top match (tap
+     *   commits immediately; full emoji label remap arrives with plan 02
+     *   layout resolve — until then the T9 keyword path is reused and the
+     *   reuse is logged once per session batch, not silently assumed).
      */
     internal fun onPadCode(code: String) {
         val key = activeSpec?.keyByCode(code)
@@ -249,6 +351,12 @@ class KbInputMethodService : InputMethodService() {
         if (symbols.isNotEmpty() && symbols.none { it.isLetter() }) {
             commitText(symbols.substring(0, 1))
             seq.clear()
+            return
+        }
+        val policy = gesturePolicy()
+        if (!policy.predictionEnabled) {
+            // Numbers: digit-commit, no prediction state.
+            commitRaw(code.filter { it.isDigit() }.takeIf { it.isNotEmpty() } ?: code)
             return
         }
         if (!predictionEnabled) {
@@ -259,7 +367,37 @@ class KbInputMethodService : InputMethodService() {
         seq.append(code)
         // Show composing text so the field reflects in-progress T9 seq.
         currentInputConnection?.setComposingText(seq.toString(), 1)
-        refreshSuggestions(seq.toString())
+        if (policy.tapCommitsImmediately && activeAssetId == "emoji") {
+            commitTopMatchNow(seq.toString())
+        } else {
+            refreshSuggestions(seq.toString())
+        }
+    }
+
+    /**
+     * Emoji tap-commits-immediately: suggest off the current seq and commit
+     * the top match right away; keeps composing when nothing matches (with
+     * an explicit log entry — an empty emoji tap is data, not silence).
+     */
+    private fun commitTopMatchNow(query: String) {
+        val snapshot = query
+        val layoutId = activeLayoutId
+        serviceScope.launch {
+            val prev = prevWord()
+            val result = try {
+                suggestWithLayout(predictor, snapshot, prev, layoutId, limit = 30)
+            } catch (e: Exception) {
+                reportGestureError("Emoji lookup failed: ${e.message}")
+                emptyList()
+            }
+            if (result.isNotEmpty()) {
+                liveCandidates = result.map { it.word }
+                commitCandidate(result.first().word)
+            } else {
+                gestureLog.record("pad", "tap", "emoji-no-match", snapshot)
+                liveCandidates = emptyList()
+            }
+        }
     }
 
     /** Space key (t9-12 `0`, t9-16 `0`/`wx␣`): accept top candidate, else space. */
@@ -376,14 +514,26 @@ class KbInputMethodService : InputMethodService() {
             (learnByCategory[activeAssetId] ?: true)
 
     private fun commitCandidate(word: String) {
+        commitCandidateWithTerminator(word, " ")
+    }
+
+    /**
+     * Commits [word] + [terminator] and runs the learn path (accept() →
+     * learning) when [shouldLearnNow]. Tracks the commit for the 5s
+     * reject window (SPEC §2: deleting a committed word within 5s, or
+     * picking another candidate, records a reject).
+     */
+    private fun commitCandidateWithTerminator(word: String, terminator: String) {
         val prev = prevWord()
         val layoutId = activeLayoutId
         val text = if (capsNext) word.replaceFirstChar { it.uppercase() } else word
         capsNext = false
-        commitText("$text ")
+        commitText("$text$terminator")
         seq.clear()
         qwertyBuffer.clear()
         liveCandidates = emptyList()
+        lastCommitWord = word
+        lastCommitTs = System.currentTimeMillis()
         // Fire-and-forget learn on Dispatchers.Default inside Predictor,
         // gated on password + incognito + input class + category.
         if (shouldLearnNow()) {
@@ -394,6 +544,14 @@ class KbInputMethodService : InputMethodService() {
                 }
             }
         }
+    }
+
+    /** Commits raw text: no prediction state, no learning (symbols/digits). */
+    private fun commitRaw(text: String) {
+        seq.clear()
+        qwertyBuffer.clear()
+        liveCandidates = emptyList()
+        commitText(text)
     }
 
     private fun commitText(text: String) {
@@ -416,7 +574,252 @@ class KbInputMethodService : InputMethodService() {
             refreshSuggestions(qwertyBuffer.toString())
             return
         }
+        // Real text deletion: a commit inside the 5s window counts as a
+        // reject of that word (SPEC §2 learning rule).
+        maybeRejectLastCommit()
         ic.deleteSurroundingText(1, 0)
+    }
+
+    /** Records a reject when the user deletes within 5s of a commit. */
+    private fun maybeRejectLastCommit() {
+        val word = lastCommitWord ?: return
+        if (System.currentTimeMillis() - lastCommitTs > 5000) {
+            lastCommitWord = null
+            return
+        }
+        lastCommitWord = null
+        gestureLog.record("pad", "delete-within-5s", "reject", word)
+        serviceScope.launch {
+            try {
+                predictor.reject(word)
+            } catch (e: Exception) {
+                reportGestureError("Reject logging failed: ${e.message}")
+            }
+        }
+    }
+
+    // -- Plan 01 Pad gesture actions (flings + long-press + delete-slide). --
+
+    /**
+     * Fling `←`: short (1 word, still composing) reverts the last keypress;
+     * otherwise deletes [words] words from committed text. Release commits;
+     * the deleted text stays restorable via [undoDelete] for 5s.
+     */
+    internal fun onPadFlingDelete(words: Int) {
+        deletePreviewWords = 0
+        val policy = gesturePolicy()
+        if (!policy.flingLeftEnabled) {
+            gestureLog.record("pad", "fling-left", "ignored-disabled", policy.disabledReason.orEmpty())
+            gestureError = policy.disabledReason
+            return
+        }
+        if (words <= 1 && (seq.isNotEmpty() || qwertyBuffer.isNotEmpty())) {
+            gestureLog.record("pad", "fling-left", "commit-revert-keypress")
+            deleteLast()
+            return
+        }
+        deleteWords(words.coerceAtLeast(1))
+    }
+
+    /** Live delete-slide preview (slide-back shrinks the count to 0). */
+    internal fun onDeleteSlidePreview(words: Int) {
+        deletePreviewWords = words
+    }
+
+    /**
+     * Deletes [n] words (plus trailing whitespace) before the cursor using
+     * explicit word-boundary analysis of text-before-cursor. Every failure
+     * surfaces via [gestureError]; success arms the 5s [undoDelete].
+     */
+    private fun deleteWords(n: Int) {
+        val ic = currentInputConnection ?: run {
+            reportGestureError("Delete failed: no input connection")
+            return
+        }
+        maybeRejectLastCommit()
+        val before = try {
+            ic.getTextBeforeCursor(256, 0)?.toString().orEmpty()
+        } catch (e: Exception) {
+            reportGestureError("Delete failed: could not read text (${e.message})")
+            return
+        }
+        if (before.isEmpty()) {
+            try {
+                ic.deleteSurroundingText(1, 0)
+            } catch (e: Exception) {
+                reportGestureError("Delete failed: ${e.message}")
+            }
+            return
+        }
+        var i = before.length
+        val end = i
+        var count = 0
+        while (i > 0 && count < n) {
+            while (i > 0 && before[i - 1].isWhitespace()) i--
+            if (i == 0) break
+            while (i > 0 && !before[i - 1].isWhitespace()) i--
+            count++
+        }
+        val span = end - i
+        if (span <= 0) return
+        undoText = before.substring(i, end)
+        try {
+            ic.deleteSurroundingText(span, 0)
+        } catch (e: Exception) {
+            reportGestureError("Delete of $count word(s) failed: ${e.message}")
+            return
+        }
+        gestureLog.record("pad", "fling-left", "commit-delete-words", "$count")
+        armUndo()
+    }
+
+    /** 5s undo window after a fling-delete commit (shown in SuggestionBar). */
+    private fun armUndo() {
+        undoExpiry?.let { mainHandler.removeCallbacks(it) }
+        undoAvailable = true
+        val expiry = Runnable {
+            undoAvailable = false
+            undoText = ""
+        }
+        undoExpiry = expiry
+        mainHandler.postDelayed(expiry, 5000)
+    }
+
+    internal fun undoDelete() {
+        undoExpiry?.let { mainHandler.removeCallbacks(it) }
+        undoExpiry = null
+        undoAvailable = false
+        if (undoText.isEmpty()) {
+            reportGestureError("Nothing to undo: deleted text already expired")
+            return
+        }
+        commitText(undoText)
+        gestureLog.record("pad", "tap-undo", "undo-delete", undoText)
+        undoText = ""
+    }
+
+    /**
+     * Fling `↑` (policy-driven):
+     * - numbers → commit `0` (the Space/0 position on a digit pad);
+     * - js/rust/html/math → commit top + space or `;` (Gesture Tuning);
+     * - otherwise → space + commit top candidate, plain space when not
+     *   composing (shared with the space key path).
+     */
+    internal fun onPadFlingSpace() {
+        val policy = gesturePolicy()
+        if (!policy.flingUpEnabled) {
+            gestureLog.record("pad", "fling-up", "ignored-disabled", policy.disabledReason.orEmpty())
+            gestureError = policy.disabledReason
+            return
+        }
+        when (policy.flingUpAction) {
+            FlingUpAction.ZERO -> {
+                gestureLog.record("pad", "fling-up", "commit-zero")
+                commitRaw("0")
+            }
+            FlingUpAction.COMMIT_PLUS_TERMINATOR -> {
+                val top = liveCandidates.firstOrNull()
+                if (top != null && (seq.isNotEmpty() || qwertyBuffer.isNotEmpty())) {
+                    val term = GestureTuningStore.codeTerminator(this)
+                    gestureLog.record("pad", "fling-up", "commit-top-terminator", term)
+                    commitCandidateWithTerminator(top, term)
+                } else {
+                    gestureLog.record("pad", "fling-up", "commit-terminator-only")
+                    commitRaw(GestureTuningStore.codeTerminator(this))
+                }
+            }
+            FlingUpAction.SPACE_COMMIT_TOP -> {
+                gestureLog.record("pad", "fling-up", "space-commit-top")
+                onPadSpace()
+            }
+        }
+    }
+
+    /**
+     * Fling `→`: accept top suggestion (= tap candidate #1). Explicit noop
+     * with a log entry when there is nothing to accept (numbers category or
+     * empty strip) — never a silent swallow.
+     */
+    internal fun onPadFlingAccept() {
+        val policy = gesturePolicy()
+        if (!policy.flingRightEnabled) {
+            gestureLog.record("pad", "fling-right", "noop-no-prediction", activeAssetId)
+            return
+        }
+        acceptTopCandidate("pad-fling")
+    }
+
+    internal fun acceptTopCandidate(source: String) {
+        val top = liveCandidates.firstOrNull()
+        if (top == null) {
+            gestureLog.record("pad", "accept", "noop-empty-strip", source)
+            return
+        }
+        gestureLog.record("pad", "accept", "accept-#1", "$source:$top")
+        commitCandidate(top)
+    }
+
+    /** Fling `↓`: hide keyboard. Never symbols (rejected, stays rejected). */
+    internal fun onPadFlingHide() {
+        gestureLog.record("pad", "fling-down", "hide")
+        try {
+            requestHideSelf(0)
+        } catch (e: Exception) {
+            reportGestureError("Hide keyboard failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Long-press (~400ms, no move): symbols sheet for the pressed key.
+     * - default: key's SPEC §1 alt chars + its digit;
+     * - emoji ([LongPressKind.TONE_PICKER]): key chars are the variant pool;
+     * - js/rust/html/math ([LongPressKind.VARIANT_PREVIEW]): same pool, titled
+     *   as a variant preview — full snippet skeletons arrive with plan 07.
+     * Unknown key (empty code): explicit digit sheet + logged miss, never an
+     * empty sheet.
+     */
+    internal fun onKeyLongPress(code: String, symbols: String) {
+        val policy = gesturePolicy()
+        if (code.isEmpty() || symbols.isEmpty()) {
+            gestureLog.record("pad", "long-press", "unknown-key-sheet", code)
+            symbolsTitle = "Key unknown — pick a digit"
+            symbolsOptions = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
+            return
+        }
+        val digit = code.filter { it.isDigit() }.take(1)
+        val chars = (symbols.toList().map { it.toString() } + digit)
+            .distinct()
+            .filter { it.isNotEmpty() }
+        if (chars.isEmpty()) {
+            reportGestureError("No symbols for key $code")
+            gestureLog.record("pad", "long-press", "empty-symbols", code)
+            return
+        }
+        symbolsTitle = when (policy.longPressKind) {
+            LongPressKind.TONE_PICKER -> "Variant — $code"
+            LongPressKind.VARIANT_PREVIEW -> "Variant preview — $code"
+            LongPressKind.SYMBOLS_SHEET -> "Symbols — $code"
+        }
+        symbolsOptions = chars
+        gestureLog.record("pad", "long-press", "symbols-sheet", code)
+    }
+
+    private fun showGenericSymbolsSheet() {
+        symbolsTitle = "Symbols"
+        symbolsOptions = listOf("@", "#", "$", "%", "&", "*", "-", "+", "(", ")")
+        gestureLog.record("pad", "tap-sym", "symbols-sheet", "fallback-bar")
+    }
+
+    /** Tapping a symbols-sheet entry commits it raw (breaks word, no learn). */
+    internal fun onSymbolPick(symbol: String) {
+        symbolsOptions = emptyList()
+        symbolsTitle = ""
+        if (symbol.isEmpty()) {
+            reportGestureError("Empty symbol pick ignored")
+            return
+        }
+        gestureLog.record("pad", "tap-symbol", "commit-raw", symbol)
+        commitRaw(symbol)
     }
 
     internal fun onCategoryChanged(tabLabel: String) {
@@ -435,6 +838,10 @@ class KbInputMethodService : InputMethodService() {
             onDelete = { deleteLast() }
             onEnter = { onQwertyEnter() }
             onSwitchIme = { switchToNextIme() }
+            onFlingAccept = { acceptTopCandidate("qwerty-fling") }
+            onGestureRejected = { reason -> gestureLog.record("qwerty", "fling", "rejected", reason) }
+            gesturesEnabled = flingsAllowedAT
+            updateThresholds(effectiveThresholds())
         }
     } else {
         padViewFor(this, activeLayoutId).apply {
@@ -445,6 +852,16 @@ class KbInputMethodService : InputMethodService() {
             onEnter = { handleEnter() }
             onControl = { code -> onPadControl(code) }
             onSwitchIme = { switchToNextIme() }
+            onFlingDelete = { words -> onPadFlingDelete(words) }
+            onDeleteSlide = { words -> onDeleteSlidePreview(words) }
+            onFlingSpace = { onPadFlingSpace() }
+            onFlingAccept = { onPadFlingAccept() }
+            onFlingHide = { onPadFlingHide() }
+            onKeyLongPress = { code, symbols -> onKeyLongPress(code, symbols) }
+            onGestureRejected = { reason -> gestureLog.record("pad", "touch", "rejected", reason) }
+            gesturesEnabled = flingsAllowedAT
+            flingGate = gateFor(gesturePolicy())
+            updateThresholds(effectiveThresholds())
         }
     }
 

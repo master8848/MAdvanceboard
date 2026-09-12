@@ -12,6 +12,13 @@
 //! - Devanagari initials are collapsed phonetically onto the same keys
 //!   (k-series->2, c/j->3, retroflex->4, dental->5, p/b/m->6,
 //!   y/r/l/w->7, s/h->8, vowels->9).
+//! - Devanagari matras, virama, and signs (ा ि ी ु ू े ै ो ौ ं ः ँ ॉ ्)
+//!   are NON-EMITTING modifiers: `char_to_digit` returns `None` for them,
+//!   so `encode_word` of Devanagari yields the consonant skeleton
+//!   (plan/03-nepali-transliteration.md). Roman typing matches through
+//!   `PackWord.tr` seqs, which are primary; the skeleton is fallback only.
+//!   (This intentionally supersedes SPEC section 1's older
+//!   "matra -> base vowel" rule, which produced spurious `9`s.)
 
 /// Map a single character to its T9 digit. Returns `None` for control
 /// keys (`*`, `#`) and unmapped characters.
@@ -45,9 +52,16 @@ pub fn char_to_digit(c: char) -> Option<char> {
         'य' | 'र' | 'ल' | 'व' | 'श' => Some('7'),
         // s/h -> 8
         'ष' | 'स' | 'ह' => Some('8'),
-        // vowels (independent + matras + signs) -> 9
-        'अ' | 'आ' | 'इ' | 'ई' | 'उ' | 'ऊ' | 'ए' | 'ऐ' | 'ओ' | 'औ' | 'ा' | 'ि' | 'ी' | 'ु' | 'ू' | 'े' | 'ै' | 'ो' | 'ौ' | 'ं' | 'ः' | 'ँ' | 'ॉ' | '्' => {
-            Some('9')
+        // Independent vowels -> 9. Matras, virama, and nasal/sign
+        // modifiers are NON-EMITTING (return None, skipped by
+        // `encode_word`): they can never stand alone as a keypress, and
+        // emitting them produced spurious `9`s in every word
+        // (plan/03-nepali-transliteration.md). Roman `tr` seqs are the
+        // primary search path; the Devanagari consonant skeleton that
+        // remains is fallback only.
+        'अ' | 'आ' | 'इ' | 'ई' | 'उ' | 'ऊ' | 'ए' | 'ऐ' | 'ओ' | 'औ' => Some('9'),
+        'ा' | 'ि' | 'ी' | 'ु' | 'ू' | 'े' | 'ै' | 'ो' | 'ौ' | 'ं' | 'ः' | 'ँ' | 'ॉ' | '्' => {
+            None
         }
         _ => None,
     }
@@ -175,7 +189,7 @@ pub fn t9_fallback_spec() -> crate::layout::LayoutSpec {
         ("6", "mno", "mnoMNOपफबभम", "text", 1, 2),
         ("7", "pqrs", "pqrsPQRSयरलवश", "text", 2, 0),
         ("8", "tuv", "tuvTUVषसह", "text", 2, 1),
-        ("9", "wxyz", "wxyzWXYZअआइईउऊएऐओऔािीुूेैोौंःँॉ्", "text", 2, 2),
+        ("9", "wxyz", "wxyzWXYZअआइईउऊएऐओऔ", "text", 2, 2),
         ("*", "back/cycle", "", "control", 3, 0),
         ("0", "space", " ", "space", 3, 1),
         ("#", "mode", "", "control", 3, 2),
@@ -254,6 +268,23 @@ mod tests {
         assert_eq!(char_to_digit('क'), Some('2'));
         assert_eq!(char_to_digit('म'), Some('6'));
         assert_eq!(char_to_digit('अ'), Some('9'));
+        assert_eq!(encode_word("कमल"), "267");
+    }
+
+    #[test]
+    fn matras_virama_signs_are_non_emitting() {
+        // plan/03: matras can never stand alone, so they must not emit `9`.
+        for m in [
+            'ा', 'ि', 'ी', 'ु', 'ू', 'े', 'ै', 'ो', 'ौ', 'ं', 'ः', 'ँ', 'ॉ', '्',
+        ] {
+            assert_eq!(char_to_digit(m), None, "matra/sign {m:?} must not emit");
+        }
+        // `encode` of Devanagari is the consonant skeleton: independent
+        // vowels still emit 9, matras vanish.
+        // नमस्ते = न(5) म(6) स(8) ्(-) त(5) े(-) -> "5685".
+        assert_eq!(encode_word("नमस्ते"), "5685");
+        // कि = क(2) ि(-) -> "2", not "29".
+        assert_eq!(encode_word("कि"), "2");
         assert_eq!(encode_word("कमल"), "267");
     }
 
