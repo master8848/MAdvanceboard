@@ -380,6 +380,7 @@ mod tests {
         let m = T9Mapping;
         for w in [
             "hello", "fun", "Hello", "a b", "hi!", "a1", "a*c", "कमल",
+            "नमस्ते", "कि", "काठमाडौं",
             "serendipity", "user@host", "QoS", "C++", "e-mail", "don't",
         ] {
             assert_eq!(t9.encode_word(w), m.encode_word(w), "word {w:?}");
