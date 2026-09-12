@@ -29,4 +29,5 @@ dependencies {
     // output of `uniffi-bindgen 0.32.1`, matching `uniffi 0.32.1` in
     // core-rust/Cargo.toml). Load is lazy at first Predictor use.
     implementation(libs.jna)
+    testImplementation(libs.junit4)
 }
