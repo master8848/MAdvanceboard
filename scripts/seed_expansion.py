@@ -348,28 +348,94 @@ props render component effect ref memo context router route link nav form
 input button select option table row cell list item menu dialog modal toast
 theme dark light color size width height margin padding border radius shadow
 flex grid center top bottom left right front back next prev first last index
-count total sum avg min max sort find every some flat concat reverse fill"""
+count total sum avg min max sort find every some flat concat reverse fill
+if else for while return in do case default true false null undefined as of
+is static private public protected accessor declare asserts satisfies using
+out any globalThis isNaN isFinite encodeURI decodeURI encodeURIComponent
+decodeURIComponent parse apply call bind has add clear test exec flags
+ignoreCase sticky message stack cause all allSettled race withResolvers
+groupBy fromEntries fromAsync toSorted toReversed toSpliced findLast at with
+padStart padEnd trimStart trimEnd repeat startsWith endsWith matchAll
+replaceAll match search toLowerCase toUpperCase substring charAt normalize
+create freeze seal defineProperty getPrototypeOf hasOwn random floor ceil
+round trunc hypot sign cbrt pow abs sqrt done value length name arguments
+AggregateError TypeError RangeError SyntaxError ReferenceError assert enum
+type namespace implements abstract override readonly unknown never infer keyof
+currentTarget bubbles composed click change load resize keydown keyup
+textContent outerHTML innerText closest matches toggle prepend shadowRoot
+attachShadow getRootNode isConnected insertAdjacentHTML scroll scrollTo focus
+blur submit on off play pause currentTime duration volume loop setTimeout
+setInterval clearTimeout clearInterval requestAnimationFrame cancelAnimationFrame
+observe disconnect observer sessionStorage indexedDB performance structuredClone
+queueMicrotask AbortController Headers Request Response WebSocket Worker
+clipboard geolocation status statusText url ok body text arrayBuffer blob clone
+getElementById querySelectorAll createElement appendChild removeChild
+insertBefore cloneNode setAttribute getAttribute classList dataset style
+exports dirname filename argv env stdout stdin stderr exit cwd mkdir
+appendFile readFile writeFile readdir stat pipe emit describe it expect
+beforeEach afterEach beforeAll afterAll mock signal"""
 
 RUST_NEW = """box rc arc option some none result ok err vec string str slice array
 tuple hashmap hashset iter collect clone copy debug display default drop send
-sync borrow owned lifetime generic macro println print format vecm todo panic
+sync borrow owned lifetime generic macro println print format todo panic
 assert derive repr allow deny warn inline cfg test bench super self in union
 offset transmute forget pin future stream thread spawn join main char bool
 usize isize u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 cell refcell mutex atomic
-channel error kind cause context from into try map unwrap expect okm errm
-asref asmut borrowm own boxm pinm scop guard lock read write sendm syncm
-lifet-param param arg ret val num idx len cap ptr slice2 array2 strm"""
+channel error kind from into try map unwrap expect
+lock read write
+eprintln assert_eq assert_ne debug_assert unimplemented unreachable matches
+include include_str include_bytes option_env compile_error stringify file line
+column module_path concat write writeln format_args thread_local link
+export_name no_mangle deprecated forbid must_use track_caller cold doc
+as new leak into_raw from_raw downgrade upgrade weak as_ref as_mut borrow_mut
+try_from try_into and_then or_else map_or unwrap_or unwrap_or_else is_some
+is_none is_ok is_err as_slice to_vec to_string to_owned into_iter iter_mut
+enumerate filter_map flat_map find_map find any all sum product fold for_each
+count last nth next peekable chain take skip zip by_ref clamp pow sqrt abs
+hypot push pop insert remove retain split trim starts_with ends_with contains
+replace lines chars bytes is_empty capacity reserve clear drain extend append
+windows chunks sort reverse binary_search partition try_fold successors
+from_iter from_fn once empty repeat stdin stdout stderr args current_dir
+create open metadata exists remove_file create_dir read_dir read_to_string
+read_line flush seek path pathbuf bufreader bufwriter oncelock lazylock cow
+manuallydrop maybeuninit phantomdata wrapping saturating nonzero range bound
+ordering hash hasher deref closure abstract become do final macro override
+priv typeof unsized virtual yield gen"""
+
+# Placeholder-grade tokens seeded earlier (`*2`/`*m` dedupe hacks, bare
+# fragments): removed from the built packs by main() below, replaced by the
+# real std names above. Never reintroduce suffixed variants.
+RUST_DROP = """array2 asmut asref borrowm boxm errm okm lifet-param param arg
+ret val num idx cap ptr strm slice2 vecm scop sendm syncm pinm own guard
+cause context"""
 
 HTML_NEW = """aside figure figcaption details summary dialog canvas video audio
 source track embed iframe object picture svg path circle template slot code
 pre hr br strong em small mark del ins sub sup kbd samp abbr cite q time
 progress meter output fieldset legend class id href src alt action method name
 value checked disabled readonly required rows cols target rel media content
-defer span2 div2 header2 footer2 nav2 main2 section2 article2 placeholder
+defer placeholder
 charset viewport maxlength colspan rowspan contenteditable draggable hidden
 tabindex role aria label described labelledby controls autoplay loop muted
-poster preload kind srclang default2 open disabled2 autofocus multiple min
-max step pattern list spellcheck translate accesskey inert popover dialog2"""
+poster preload kind srclang open autofocus multiple min
+max step pattern list spellcheck translate accesskey inert popover
+address area b base bdi bdo big blockquote caption center col colgroup data
+datalist dd dfn dl dt font h1 h2 h3 h4 h5 h6 i map marquee menu noscript
+optgroup s search tbody tfoot thead u var wbr dir part accept accept-charset
+allow allowfullscreen async capture coords crossorigin datetime decoding
+default dirname download enctype for form formaction headers height hreflang
+http-equiv integrity is ismap itemid itemprop itemref itemscope itemtype lang
+loading low high minlength novalidate optimum ping popoveraction popovertarget
+referrerpolicy sandbox scope selected shape sizes srcset start width wrap
+enterkeyhint inputmode autocomplete autocapitalize fetchpriority playsinline
+controlslist onclick onchange onsubmit onload oninput onkeydown onkeyup
+onfocus onblur"""
+
+# Same placeholder cleanup as Rust: `*2`-suffixed tag/attr stand-ins seeded
+# earlier are removed from the built pack by main(), replaced by the real
+# tags/attrs above.
+HTML_DROP = """span2 div2 header2 footer2 nav2 main2 section2 article2 default2
+disabled2 dialog2"""
 
 # (emoji, keyword) — seq is T9(keyword); loader ignores `key`.
 EMOJI_NEW = """😀 grin 😉 wink 😎 cool 😍 adore 😘 kiss 🤗 hug 🤔 think 🥳 party
@@ -381,7 +447,22 @@ EMOJI_NEW = """😀 grin 😉 wink 😎 cool 😍 adore 😘 kiss 🤗 hug 🤔 
 🍺 beer 🍎 apple 🍌 banana 🍇 grapes 💯 score ❗ alert 💡 bulb 🔑 keys 🔒 lock
 🔔 bell 🎸 guitar ⚽ ball 🏀 hoops 🎮 play 🏆 win 👶 baby 🙏 pray 💪 strong 👋 hi
 👌 okay ✌️ peace 👀 look 👂 hear 👄 lips 🦶 foot 💔 heartbreak 💤 rest 🎧 tunes
-📝 memo 📌 pin 🧹 broom 🧲 magnet ⏰ alarm 🎈 balloon 🪁 kite 🧸 bear2 🪆 doll"""
+📝 memo 📌 pin 🧹 broom 🧲 magnet ⏰ alarm 🎈 balloon 🪁 kite 🧸 teddy 🪆 doll
+😭 sob 😡 rage 😤 huff 😇 angel 🤠 cowboy 🥸 disguise 😷 mask 🤒 sick 🤕 hurt
+🥶 cold 🥵 hot 🤯 explode 🤩 wow 🥱 yawn 😪 sleepy 🤤 drool 😛 tongue 😜 wacky
+🤪 zany 🤑 rich 🤐 zip 🫡 salute 🫠 melt 🫣 peek 💗 grow 💓 beat 💞 revolve
+💘 cupid 💝 wrap 🧡 orange 💛 yellow 💚 green 💙 blue 💜 purple 🖤 black
+🤍 white 🤎 brown 🩷 pink 👎 dislike 🙌 cheer 🤝 shake ✊ fist ✋ palm 👐 open
+🤲 beg 👨 man 👩 woman 👦 boy 👧 girl 👴 grandpa 👵 granny 👮 cop 🎅 santa
+🐭 mouse 🐰 bunny 🦊 fox 🐨 koala 🐧 penguin 🦆 duck 🦅 eagle 🦉 owl 🦄 unicorn
+🐢 turtle 🐙 octopus 🐬 dolphin 🐆 leopard 🦒 giraffe 🦓 zebra 🐘 elephant
+🍏 sour 🍐 pear 🍊 tangerine 🍋 lemon 🍉 melon 🍓 berry 🫐 blueberry 🍒 cherry
+🍑 peach 🥭 mango 🍍 pineapple 🥥 coconut 🥝 kiwi 🍅 tomato 🫒 olive 🥦 broccoli
+🥒 cucumber 🌶 spicy 🌽 corn 🥕 carrot 🎱 pool 🏐 volley 🎾 tennis ⚾ baseball
+🛹 skate 🏄 surf 🚕 taxi 🚌 bus 🚚 truck ➕ plus ♾️ forever"""
+
+# Key fixups for rows already shipped with placeholder-grade keys.
+EMOJI_KEY_FIX = {"🧸": "teddy"}
 
 MATH_NEW = """\\phi phi \\psi psi \\chi chi \\eta eta \\mu mu \\nu nu \\xi xi
 \\zeta zeta \\tau tau \\kappa kappa \\rho rho \\partial part \\nabla nabla
@@ -390,7 +471,36 @@ MATH_NEW = """\\phi phi \\psi psi \\chi chi \\eta eta \\mu mu \\nu nu \\xi xi
 \\exp exp \\sin sin \\cos cos \\tan tan \\lim limit \\to to
 \\hbar hbar \\ell ell \\angle angle \\perp perp \\parallel par \\cong congr
 \\equiv equiv \\sim similar \\propto prop \\pm plusmin \\cdot dot \\div div
-\\circ circ \\ldots dots \\prime prime \\binom cho \\sqrt2 sqr \\cbrt cube"""
+\\circ circ \\ldots dots \\prime prime \\binom cho \\cbrt cube
+\\upsilon upsilon \\varphi varphi \\vartheta vartheta \\varpi varpi
+\\varrho varrho \\varepsilon varepsilon \\oint oint \\bigcup bigcup
+\\bigcap bigcap \\bigoplus bigoplus \\bigotimes bigotimes \\coprod coprod
+\\ll ll \\gg gg \\prec prec \\succ succ \\preceq preceq \\succeq succeq
+\\simeq simeq \\asymp asymp \\doteq doteq \\models models \\vdash vdash
+\\mid mid \\nmid nmid \\subseteq subseteq \\supseteq supseteq \\notin notin
+\\ni ni \\rightarrow rightarrow \\leftarrow leftarrow \\Rightarrow Rightarrow
+\\Leftarrow Leftarrow \\leftrightarrow leftrightarrow
+\\Leftrightarrow Leftrightarrow \\mapsto mapsto \\implies implies \\iff iff
+\\uparrow uparrow \\downarrow downarrow \\sec sec \\csc csc \\cot cot
+\\min min \\max max \\sup supremum \\inf infimum \\det det \\gcd gcd
+\\ker ker \\arg arg \\bmod bmod \\pmod pmod \\langle langle \\rangle rangle
+\\lceil lceil \\rceil rceil \\lfloor lfloor \\rfloor rfloor \\vert vert
+\\Vert Vert \\cdots cdots \\vdots vdots \\ddots ddots \\hat hat \\bar bar
+\\tilde tilde \\vec vec \\dot dot \\ddot ddot \\overline overline
+\\underline underline \\aleph aleph \\emptyset emptyset \\varnothing varnothing
+\\bullet bullet \\star star \\dagger dagger \\ddagger ddagger \\oplus oplus
+\\ominus ominus \\otimes otimes \\odot odot \\diamond diamond \\neg neg
+\\top top \\bot bot \\mathbf mathbf \\mathit mathit \\mathcal mathcal
+\\mathbb mathbb \\mathsf mathsf \\mathtt mathtt \\mbox mbox \\text text
+\\begin begin \\end end \\item item \\quad quad \\qquad qquad
+\\checkmark checkmark \\triangle triangle \\square square
+\\blacksquare blacksquare \\left left \\right right \\middle middle
+\\big big \\surd surd \\flat flat \\natural natural \\sharp sharp"""
+
+# Non-standard commands seeded earlier: dropped from the built pack by
+# main() (`\\sqrt2` is not a LaTeX command; `\\cbrt` is package-only).
+# `\\sqrt` itself stays.
+MATH_DROP = """\\sqrt2 \\cbrt"""
 
 TITLES = {
     "words": "English Base", "medical": "Medical Terms", "ne": "Nepali Base (Romanized)",
@@ -474,9 +584,42 @@ def run(*args):
         sys.exit(r.returncode)
 
 
+def drop_words(pack_name: str, words: set):
+    """Remove placeholder-grade rows from a built pack (reproducible)."""
+    from build_pack import encode_word  # same T9 map the builder uses
+    p = ROOT / "packs" / f"{pack_name}.json"
+    d = json.loads(p.read_text(encoding="utf-8"))
+    before = len(d["words"])
+    d["words"] = [e for e in d["words"] if e["w"] not in words]
+    p.write_text(json.dumps(d, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"drop {pack_name}: -{before - len(d['words'])} "
+          f"placeholders, total {len(d['words'])}")
+
+
+def fix_emoji_keys():
+    """Rewrite placeholder-grade emoji `key`s, re-materializing `seq`."""
+    from build_pack import encode_word
+    p = ROOT / "packs" / "emoji.json"
+    d = json.loads(p.read_text(encoding="utf-8"))
+    n = 0
+    for e in d["words"]:
+        new_key = EMOJI_KEY_FIX.get(e["w"])
+        if new_key and e.get("key") != new_key:
+            e["key"] = new_key
+            e["seq"] = encode_word(new_key)
+            n += 1
+    p.write_text(json.dumps(d, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"fix emoji keys: {n} rows, total {len(d['words'])}")
+
+
 def main():
     write_sources()
     P = ROOT / "packs"
+    # Placeholder cleanup first (reproducible; expand-pack only adds).
+    drop_words("code_rust", set(RUST_DROP.split()))
+    drop_words("code_html", set(HTML_DROP.split()))
+    drop_words("math", set(MATH_DROP.split()))
+    fix_emoji_keys()
     run("build", "--id", "words", "--title", TITLES["words"], "--in",
         str(SRC / "words_en.txt"), "--out", str(P / "words_en.json"),
         "--lang", "en", "--cat", "words", "--version", "1.1.0",
@@ -499,11 +642,11 @@ def main():
         "--f0", "4500", "--alpha", "0.7", "--fmin", "800")
     run("expand-pack", "--pack", str(P / "math.json"), "--in", str(SRC / "math.csv"),
         "--f0", "4000", "--alpha", "0.7", "--fmin", "800")
-    # bump expanded pack versions to 1.1.0 (nepali excluded: pipeline-owned v2.0.0)
+    # bump expanded pack versions to 1.2.0 (nepali excluded: pipeline-owned v2.0.0)
     for name in ("code_js", "code_rust", "code_html", "emoji", "math"):
         p = P / f"{name}.json"
         d = json.loads(p.read_text(encoding="utf-8"))
-        d["version"] = "1.1.0"
+        d["version"] = "1.2.0"
         p.write_text(json.dumps(d, ensure_ascii=False) + "\n", encoding="utf-8")
     run("validate", "--all")
     run("stats", "--all")
