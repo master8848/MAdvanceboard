@@ -202,6 +202,38 @@ impl Predictor {
             .unwrap_or_else(|e| panic!("Predictor::clear_cat_layout: lock poisoned: {e}"));
     }
 
+    /// Enable/disable a category tab at runtime (user-pack toggle,
+    /// plan/08): a disabled cat suggests nothing anywhere until
+    /// re-enabled (see [`DictionaryStack::set_cat_enabled`]). Unknown
+    /// cats are accepted (a pack may install later); the toggle is
+    /// explicit state, never derived silently.
+    pub fn set_cat_enabled(&self, cat: String, enabled: bool) {
+        self.inner
+            .lock()
+            .map(|mut i| i.stack.set_cat_enabled(&cat, enabled))
+            .unwrap_or_else(|e| panic!("Predictor::set_cat_enabled: lock poisoned: {e}"));
+    }
+
+    /// True when `cat` contributes to suggest (installed and not disabled).
+    pub fn is_cat_enabled(&self, cat: String) -> bool {
+        self.inner
+            .lock()
+            .map(|i| i.stack.is_cat_enabled(&cat))
+            .unwrap_or_else(|e| panic!("Predictor::is_cat_enabled: lock poisoned: {e}"))
+    }
+
+    /// Dictionary placement info for a word (`pack cat • freq • accepts`,
+    /// see [`DictionaryStack::placement`]): which pack owns `word`, its
+    /// static frequency, and the personal accept count. Returns `""` when
+    /// no pack holds the word (UniFFI-safe `String`; empty is the explicit
+    /// no-record signal, never a fabricated pack).
+    pub fn placement(&self, word: String) -> String {
+        self.inner
+            .lock()
+            .map(|i| i.stack.placement(&word).unwrap_or_default())
+            .unwrap_or_else(|e| panic!("Predictor::placement: lock poisoned: {e}"))
+    }
+
     /// Current global default layout id.
     pub fn default_layout(&self) -> String {
         self.inner
@@ -595,24 +627,6 @@ impl Predictor {
         self.try_add_pack(&pack, priority)
     }
 
-    /// Enable/disable a category tab at runtime (user-pack toggle,
-    /// plan/08): a disabled cat suggests nothing anywhere until
-    /// re-enabled (see [`DictionaryStack::set_cat_enabled`]).
-    pub fn set_cat_enabled(&self, cat: &str, enabled: bool) {
-        self.inner
-            .lock()
-            .map(|mut i| i.stack.set_cat_enabled(cat, enabled))
-            .unwrap_or_else(|e| panic!("Predictor::set_cat_enabled: lock poisoned: {e}"));
-    }
-
-    /// True when `cat` contributes to suggest (installed and not disabled).
-    pub fn is_cat_enabled(&self, cat: &str) -> bool {
-        self.inner
-            .lock()
-            .map(|i| i.stack.is_cat_enabled(cat))
-            .unwrap_or_else(|e| panic!("Predictor::is_cat_enabled: lock poisoned: {e}"))
-    }
-
     // ---- Persistence: fallible Rust APIs (UniFFI-safe wrappers above) ----
 
     /// Flush dirty rows + pending events through the open store.
@@ -888,7 +902,7 @@ mod tests {
         let p = Predictor::new(
             r#"[{"w":"bob","freq":900,"cat":"EN"}]"#.to_string(),
         );
-        assert!(p.is_cat_enabled("names"));
+        assert!(p.is_cat_enabled("names".to_string()));
         p.try_add_user_pack("names", "Names", "coa 100\n", "en", 50).unwrap();
         // Isolated: the names tab shows its own word, not EN "bob" (262).
         let s = p.suggest("".to_string(), "262".to_string(), "names".to_string(), 5);
@@ -901,10 +915,10 @@ mod tests {
         let s2 = p.suggest("".to_string(), "262".to_string(), "names".to_string(), 5);
         assert!(s2.iter().any(|c| c.word == "cob"), "learned word must suggest, got {:?}", s2.iter().map(|c| &c.word).collect::<Vec<_>>());
         // Disable hides the tab; re-enable restores it.
-        p.set_cat_enabled("names", false);
-        assert!(!p.is_cat_enabled("names"));
+        p.set_cat_enabled("names".to_string(), false);
+        assert!(!p.is_cat_enabled("names".to_string()));
         assert!(p.suggest("".to_string(), "262".to_string(), "names".to_string(), 5).is_empty());
-        p.set_cat_enabled("names", true);
+        p.set_cat_enabled("names".to_string(), true);
         assert!(!p.suggest("".to_string(), "262".to_string(), "names".to_string(), 5).is_empty());
     }
 
