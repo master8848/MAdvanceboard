@@ -693,6 +693,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_kbcore_checksum_method_predictor_forget(
     ): Int
+    external fun uniffi_kbcore_checksum_method_predictor_is_cat_enabled(
+    ): Int
     external fun uniffi_kbcore_checksum_method_predictor_layout_diagnostic(
     ): Int
     external fun uniffi_kbcore_checksum_method_predictor_layouts(
@@ -705,11 +707,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_kbcore_checksum_method_predictor_open_persist(
     ): Int
+    external fun uniffi_kbcore_checksum_method_predictor_placement(
+    ): Int
     external fun uniffi_kbcore_checksum_method_predictor_register_layout(
     ): Int
     external fun uniffi_kbcore_checksum_method_predictor_reject(
     ): Int
     external fun uniffi_kbcore_checksum_method_predictor_reject_with_shown(
+    ): Int
+    external fun uniffi_kbcore_checksum_method_predictor_set_cat_enabled(
     ): Int
     external fun uniffi_kbcore_checksum_method_predictor_set_cat_layout(
     ): Int
@@ -771,6 +777,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_kbcore_fn_method_predictor_forget(`ptr`: Long,`word`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_kbcore_fn_method_predictor_is_cat_enabled(`ptr`: Long,`cat`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_kbcore_fn_method_predictor_layout_diagnostic(`ptr`: Long,`cat`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_kbcore_fn_method_predictor_layouts(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -783,11 +791,15 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_kbcore_fn_method_predictor_open_persist(`ptr`: Long,`path`: RustBuffer.ByValue,`syncDir`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_kbcore_fn_method_predictor_placement(`ptr`: Long,`word`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_kbcore_fn_method_predictor_register_layout(`ptr`: Long,`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_kbcore_fn_method_predictor_reject(`ptr`: Long,`word`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_kbcore_fn_method_predictor_reject_with_shown(`ptr`: Long,`word`: RustBuffer.ByValue,`shown`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_kbcore_fn_method_predictor_set_cat_enabled(`ptr`: Long,`cat`: RustBuffer.ByValue,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_kbcore_fn_method_predictor_set_cat_layout(`ptr`: Long,`cat`: RustBuffer.ByValue,`layoutId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -952,6 +964,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_kbcore_checksum_method_predictor_forget() and 0xFFFF) != 55571) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_kbcore_checksum_method_predictor_is_cat_enabled() and 0xFFFF) != 47843) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_kbcore_checksum_method_predictor_layout_diagnostic() and 0xFFFF) != 9049) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -970,6 +985,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_kbcore_checksum_method_predictor_open_persist() and 0xFFFF) != 8543) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_kbcore_checksum_method_predictor_placement() and 0xFFFF) != 48413) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_kbcore_checksum_method_predictor_register_layout() and 0xFFFF) != 27955) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -979,16 +997,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_kbcore_checksum_method_predictor_reject_with_shown() and 0xFFFF) != 16678) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_kbcore_checksum_method_predictor_set_cat_enabled() and 0xFFFF) != 58866) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_kbcore_checksum_method_predictor_set_cat_layout() and 0xFFFF) != 42980) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_kbcore_checksum_method_predictor_set_default_layout() and 0xFFFF) != 37941) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_kbcore_checksum_method_predictor_suggest() and 0xFFFF) != 20414) {
+    if ((lib.uniffi_kbcore_checksum_method_predictor_suggest() and 0xFFFF) != 2845) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_kbcore_checksum_method_predictor_suggest_for_cat() and 0xFFFF) != 61663) {
+    if ((lib.uniffi_kbcore_checksum_method_predictor_suggest_for_cat() and 0xFFFF) != 8702) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_kbcore_checksum_method_predictor_suggest_with_layout() and 0xFFFF) != 53889) {
@@ -1232,6 +1253,29 @@ public object FfiConverterDouble: FfiConverter<Double, Double> {
 /**
  * @suppress
  */
+public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
+    override fun lift(value: Byte): Boolean {
+        return value.toInt() != 0
+    }
+
+    override fun read(buf: ByteBuffer): Boolean {
+        return lift(buf.get())
+    }
+
+    override fun lower(value: Boolean): Byte {
+        return if (value) 1.toByte() else 0.toByte()
+    }
+
+    override fun allocationSize(value: Boolean) = 1UL
+
+    override fun write(value: Boolean, buf: ByteBuffer) {
+        buf.put(lower(value))
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     // Note: we don't inherit from FfiConverterRustBuffer, because we use a
     // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
@@ -1451,6 +1495,11 @@ public interface PredictorInterface {
     fun `forget`(`word`: kotlin.String)
     
     /**
+     * True when `cat` contributes to suggest (installed and not disabled).
+     */
+    fun `isCatEnabled`(`cat`: kotlin.String): kotlin.Boolean
+    
+    /**
      * Resolution diagnostic for `cat`: `""` on a clean hit, otherwise
      * the explicit fallback context (same string the suggest path logs).
      */
@@ -1501,6 +1550,15 @@ public interface PredictorInterface {
     fun `openPersist`(`path`: kotlin.String, `syncDir`: kotlin.String): kotlin.String
     
     /**
+     * Dictionary placement info for a word (`pack cat • freq • accepts`,
+     * see [`DictionaryStack::placement`]): which pack owns `word`, its
+     * static frequency, and the personal accept count. Returns `""` when
+     * no pack holds the word (UniFFI-safe `String`; empty is the explicit
+     * no-record signal, never a fabricated pack).
+     */
+    fun `placement`(`word`: kotlin.String): kotlin.String
+    
+    /**
      * Register a custom layout from a `layouts/<id>.json` document.
      * (Spelled to avoid a literal `*` after `/`: that two-character
      * sequence would terminate the Kotlin KDoc block in the
@@ -1526,6 +1584,15 @@ public interface PredictorInterface {
     fun `rejectWithShown`(`word`: kotlin.String, `shown`: List<kotlin.String>)
     
     /**
+     * Enable/disable a category tab at runtime (user-pack toggle,
+     * plan/08): a disabled cat suggests nothing anywhere until
+     * re-enabled (see [`DictionaryStack::set_cat_enabled`]). Unknown
+     * cats are accepted (a pack may install later); the toggle is
+     * explicit state, never derived silently.
+     */
+    fun `setCatEnabled`(`cat`: kotlin.String, `enabled`: kotlin.Boolean)
+    
+    /**
      * Set a per-category layout override. Invalid input is an explicit
      * panic; Rust callers wanting `Result` use
      * [`Self::try_set_cat_layout`].
@@ -1543,6 +1610,9 @@ public interface PredictorInterface {
      * Suggest up to `limit` candidates for `digits` with context `ctx`.
      * `active_tab` selects the category boost (e.g. `"EN"`, `"js"`).
      * Back-compat path: always the `t9-9` default layout.
+     * Types through the production per-tab policy
+     * ([`SuggestOpts::policy_for_tab`](crate::stack::SuggestOpts::policy_for_tab)):
+     * neighbor matching OFF, every tab hard-scoped to its own words.
      */
     fun `suggest`(`ctx`: kotlin.String, `digits`: kotlin.String, `activeTab`: kotlin.String, `limit`: kotlin.UInt): List<Suggestion>
     
@@ -1550,7 +1620,8 @@ public interface PredictorInterface {
      * Suggest for a category tab, resolving the layout per keystroke:
      * per-cat override -> global default -> `t9-9` (see
      * `LayoutRegistry::resolve`). Fallbacks are loud (see
-     * [`Self::take_last_layout_error`]).
+     * [`Self::take_last_layout_error`]). Types through the production
+     * per-tab policy (neighbor OFF, every tab hard-scoped).
      */
     fun `suggestForCat`(`ctx`: kotlin.String, `digits`: kotlin.String, `activeTab`: kotlin.String, `limit`: kotlin.UInt): List<Suggestion>
     
@@ -1880,6 +1951,23 @@ open class Predictor: Disposable, AutoCloseable, PredictorInterface
 
     
     /**
+     * True when `cat` contributes to suggest (installed and not disabled).
+     */override fun `isCatEnabled`(`cat`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_kbcore_fn_method_predictor_is_cat_enabled(
+        it,
+        
+        FfiConverterString.lower(`cat`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Resolution diagnostic for `cat`: `""` on a clean hit, otherwise
      * the explicit fallback context (same string the suggest path logs).
      */override fun `layoutDiagnostic`(`cat`: kotlin.String): kotlin.String {
@@ -2002,6 +2090,27 @@ open class Predictor: Disposable, AutoCloseable, PredictorInterface
 
     
     /**
+     * Dictionary placement info for a word (`pack cat • freq • accepts`,
+     * see [`DictionaryStack::placement`]): which pack owns `word`, its
+     * static frequency, and the personal accept count. Returns `""` when
+     * no pack holds the word (UniFFI-safe `String`; empty is the explicit
+     * no-record signal, never a fabricated pack).
+     */override fun `placement`(`word`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_kbcore_fn_method_predictor_placement(
+        it,
+        
+        FfiConverterString.lower(`word`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Register a custom layout from a `layouts/<id>.json` document.
      * (Spelled to avoid a literal `*` after `/`: that two-character
      * sequence would terminate the Kotlin KDoc block in the
@@ -2062,6 +2171,27 @@ open class Predictor: Disposable, AutoCloseable, PredictorInterface
 
     
     /**
+     * Enable/disable a category tab at runtime (user-pack toggle,
+     * plan/08): a disabled cat suggests nothing anywhere until
+     * re-enabled (see [`DictionaryStack::set_cat_enabled`]). Unknown
+     * cats are accepted (a pack may install later); the toggle is
+     * explicit state, never derived silently.
+     */override fun `setCatEnabled`(`cat`: kotlin.String, `enabled`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_kbcore_fn_method_predictor_set_cat_enabled(
+        it,
+        
+        FfiConverterString.lower(`cat`),
+        FfiConverterBoolean.lower(`enabled`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * Set a per-category layout override. Invalid input is an explicit
      * panic; Rust callers wanting `Result` use
      * [`Self::try_set_cat_layout`].
@@ -2102,6 +2232,9 @@ open class Predictor: Disposable, AutoCloseable, PredictorInterface
      * Suggest up to `limit` candidates for `digits` with context `ctx`.
      * `active_tab` selects the category boost (e.g. `"EN"`, `"js"`).
      * Back-compat path: always the `t9-9` default layout.
+     * Types through the production per-tab policy
+     * ([`SuggestOpts::policy_for_tab`](crate::stack::SuggestOpts::policy_for_tab)):
+     * neighbor matching OFF, every tab hard-scoped to its own words.
      */override fun `suggest`(`ctx`: kotlin.String, `digits`: kotlin.String, `activeTab`: kotlin.String, `limit`: kotlin.UInt): List<Suggestion> {
             return FfiConverterSequenceTypeSuggestion.lift(
     callWithHandle {
@@ -2124,7 +2257,8 @@ open class Predictor: Disposable, AutoCloseable, PredictorInterface
      * Suggest for a category tab, resolving the layout per keystroke:
      * per-cat override -> global default -> `t9-9` (see
      * `LayoutRegistry::resolve`). Fallbacks are loud (see
-     * [`Self::take_last_layout_error`]).
+     * [`Self::take_last_layout_error`]). Types through the production
+     * per-tab policy (neighbor OFF, every tab hard-scoped).
      */override fun `suggestForCat`(`ctx`: kotlin.String, `digits`: kotlin.String, `activeTab`: kotlin.String, `limit`: kotlin.UInt): List<Suggestion> {
             return FfiConverterSequenceTypeSuggestion.lift(
     callWithHandle {
