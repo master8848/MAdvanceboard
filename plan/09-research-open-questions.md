@@ -10,11 +10,12 @@ For genuinely unsure / novel areas. Each is a time-boxed spike with falsifiable 
 
 ## 2. Bigram `V` non-stationarity
 
-- `V=entries.len()` (`core-rust/src/personal.rs:172`) grows → `bigram_term` more negative over time even after `04-engine-determinism.md` backoff fix. Spike: fixed `V` (e.g. 10k) vs dynamic vs Lidstone variants. Measure cold-start vs 7-day lift stability.
+- Mechanism: Laplace/add-one unseen mass ≈ `1/(N+V)`, so as personal dict grows `V=entries.len()` (`core-rust/src/personal.rs:172`) grows, mass shrinks — unseen word score drifts more negative over months though usage unchanged, even after `04-engine-determinism.md` backoff fix.
+- Compare three: fixed V (ceiling e.g. 10k, stop growing) vs dynamic V (current) vs Lidstone tunable alpha (instead of implicit alpha=1). Timeline simulation: empty → replay 7 days growing dict, plot top-3 / perplexity over timeline. Want fast early climb (cold start) without slow bleed later (stability).
 
-## 3. Schwa-deletion + variant explosion (NE)
+## 3. Schwa-deletion + variant explosion (NE) — alias cap vs collision trade curve
 
-- Casual romanizations (`paani/pani`, `shabda/sabda`, `nepal` not `nepala`) need alias generation (`shabdakosha` IAST→casual, `nepali_unicoder` overrides). Spike: how many aliases per headword before 4-digit buckets regress? Cap aliases (e.g. 3) + rank by Leipzig freq.
+- Generate aliases via IAST→casual rules + manual overrides (`shabdakosha`, `nepali_unicoder`). For cap = 0,1,2,3 per headword, count 9-key buckets with >N colliding candidates (N=4-5, suggestion-noise limit). Plot collisions-per-bucket vs cap. Within collided bucket, Leipzig freq breaks ties — not alphabetical/insertion order.
 
 ## 4. Local-scope token/snippet packs for code categories (rescoped — characters, not logic)
 
@@ -26,16 +27,18 @@ Scope is narrowed: keyboard makes *characters* cheaper, not *logic*. No multi-to
 
 Spike question: does doc-level token table beat frequency-alone for identifier recall, staying under 50ms with plain hash map — not "can LM fit on phone." Snippet tab-stop UX is separate usability test: 5-10 testers timed on canonical snippets (function signature, if-block, import line), watch confusion points.
 
-## 5. Structural math navigation
+## 5. Structural math navigation — usability, not corpus
 
-- Spike: `\frac{}{}` / matrix tabstop model (`Tab→&`, `Enter→\\`), auto-frac, symbol panel recall. Flat token is baseline; success = task-completion time for 5 canonical equations, not top-3.
+- No corpus. 5 canonical equations (quadratic formula, matrix, summation, integral, derivative), testers enter each two ways: flat token stream vs frac/matrix tab-stop model (`Tab→&`, `Enter→\\`, auto-frac, panel). Time + correction count. Success = time reduction on tab-stop version, not top-3 — math entry is structural-navigation, not prediction.
 
-## 6. Novel input ideas (only if Phase-0 NO-GO)
+## 6. Novel input ideas — gated on Phase-0 fail, don't spend time yet
 
-- Chording (multi-press) vs single-tap: changes disambiguation math + dict structure entirely — prototype, don't retrofit.
-- Deliberate 16-key for NE vs 9-key + `tr`: motor cost vs 0.6 words/bucket gain — A/B with mis-press rate (neighbor ON reduces failed commits ≥30%? `docs/INTENT.md:49`).
-- Prefix-caching + quantized static scores (`05-suggest-optimization.md` #6-7) already cover "unique solution" space without ML. Skip embeddings/neural LM at 10k vocab + 50ms + no-INTERNET constraint.
+- Chording = separate prototype track, not 9-key tweak: chord maps directly to intent, no sequential disambiguation across digit sequence. Different data model.
+- 16-key vs 9-key+tr for Nepali: A/B same testers/phrases, WPM *and* mis-press rate. Neighbor fuzzy must clear ≥30% failed-commit reduction bar (`docs/INTENT.md:49`) or extra 7 keys not worth complexity.
+- Embeddings/neural LM: settled "no" at 10k vocab / 50ms / no-INTERNET — quantized model won't beat well-tuned freq+bigram. Documented decision, revisit only if vocab/latency budget changes drastically. Prefix-cache + quantized scores (`05-suggest-optimization.md`) already cover unique-solution space.
 
-## 7. Longitudinal + power
+## 7. Longitudinal + power — two independent measurements
 
-- 7-day learning lift + KSPW from exported `log.jsonl` (`docs/SYNC.md:29`). 1h typing trace power delta; background ≤24h periodic only (`android/README.md:20`). Spelling-atrophy guard: placement popup + Pin/Block/Info usage rate (`docs/INTENT.md:63`).
+- Learning lift: export `log.jsonl` (`docs/SYNC.md:29`) across week, compute KSR = `(chars − keystrokes)/chars` (AAC metric) day-0 vs day-7 per user, look at distribution not just mean (lift varies by vocab idiosyncrasy).
+- Power: 1h typing trace prediction-on vs off (same device/script), OS battery/CPU stats; separately verify background sync stays ≤24h periodic without extra radio wakes (`android/README.md:20`).
+- Spelling guard = usage-rate question: how often popup / Pin/Block/Info actually opened. Near-zero → transparency feature fails safeguard job regardless of popup content (`docs/INTENT.md:63`).
