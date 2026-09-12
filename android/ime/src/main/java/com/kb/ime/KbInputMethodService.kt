@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
@@ -41,6 +42,13 @@ import kotlinx.coroutines.launch
  * incognito ([EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING]/privateImeOptions),
  * non-TEXT input classes, email/URI variations, and categories whose manifest
  * sets `privacy.learn=false` (numbers/math).
+ *
+ * The Tier-1 snippet helper runs under a SEPARATE gate ([snippetNow],
+ * plan 12): `math` keeps snippets while staying no-learn (math-exempt
+ * rule), `numbers` shows neither, email/URI keeps snippets. The snippet
+ * buffer ([SnippetBuffer]) is RAM-only, max 3 entries, ~2min TTL with lazy
+ * sweep on each keystroke (no timer thread), wiped on expansion commit,
+ * tab switch, IME hide, and incognito/password entry.
  *
  * The IME process stays lean on purpose: no `:sync` dependency (no Room / Work /
  * DataStore here). Personal-dict persistence/flush is owned by the `:app`
@@ -79,6 +87,20 @@ class KbInputMethodService : InputMethodService() {
 
     /** Live candidates fed by [Predictor.suggest]; read by the Compose strip. */
     private var liveCandidates by mutableStateOf(emptyList<String>())
+
+    /**
+     * Live Tier-1 snippet palette ([SnippetItem]s, plan 07 second zone below
+     * the top-3 hits). Fed from [snippetBuffer] follow-tokens + static
+     * [SnippetPalettes.staticSnippets]; empty unless [snippetNow].
+     */
+    internal var liveSnippets by mutableStateOf(emptyList<SnippetItem>())
+
+    /**
+     * Ephemeral 2-min snippet buffer (plan 07:12, 12:57). RAM-only: never
+     * SQLite, never sync, never feeds rank weights. Field (not local) so
+     * tests can pre-load triggers via [snippetBuffer].
+     */
+    internal val snippetBuffer = SnippetBuffer()
 
     /** Live pad layout id; read by [ImeScreen]'s toggle, written by [setPadLayout]. */
     private var liveLayoutId by mutableStateOf(DEFAULT_LAYOUT_ID)
@@ -405,7 +427,9 @@ class KbInputMethodService : InputMethodService() {
                     ),
                     statusLine = engineStatus ?: gestureError,
                     onError = { gestureError = it },
-                    qwertyActive = qwertyFallback
+                    qwertyActive = qwertyFallback,
+                    snippets = liveSnippets,
+                    onSnippetPick = { commitSnippet(it) }
                 )
             }
         }
@@ -428,6 +452,13 @@ class KbInputMethodService : InputMethodService() {
         inputMode = attribute.resolveInputMode()
         // Only free TEXT gets prediction; NUMBER/PHONE/DATETIME commit raw.
         predictionEnabled = inputMode == InputMode.TEXT
+        // Split-gate hygiene (plan 12:62): a password field or an incognito
+        // session wipes the snippet buffer on entry (no TTL carryover) and
+        // hides the strip. Exit needs no action — the buffer is already gone.
+        if (isPasswordField || isIncognito) {
+            snippetBuffer.clear()
+            liveSnippets = emptyList()
+        }
         seq.clear()
         qwertyBuffer.clear()
     }
@@ -470,6 +501,9 @@ class KbInputMethodService : InputMethodService() {
         seq.clear()
         qwertyBuffer.clear()
         liveCandidates = emptyList()
+        // IME hide wipes snippet state (plan 12:62): nothing carries over.
+        snippetBuffer.clear()
+        liveSnippets = emptyList()
         super.onFinishInput()
     }
 
@@ -481,6 +515,8 @@ class KbInputMethodService : InputMethodService() {
         }
         seq.clear()
         qwertyBuffer.clear()
+        snippetBuffer.clear()
+        liveSnippets = emptyList()
         super.onFinishInputView(finishingInput)
     }
 
@@ -579,6 +615,8 @@ class KbInputMethodService : InputMethodService() {
         seq.append(code)
         // Show composing text so the field reflects in-progress T9 seq.
         currentInputConnection?.setComposingText(seq.toString(), 1)
+        // Lazy snippet TTL sweep + strip refresh on every keystroke.
+        refreshSnippetStrip()
         if (policy.tapCommitsImmediately && activeAssetId == "emoji") {
             commitTopMatchNow(seq.toString())
         } else {
@@ -704,6 +742,8 @@ class KbInputMethodService : InputMethodService() {
         }
         qwertyBuffer.append(text)
         currentInputConnection?.setComposingText(qwertyBuffer.toString(), 1)
+        // Lazy snippet sweep; the html/math static palette filters on this prefix.
+        refreshSnippetStrip()
         refreshQwertySuggestions(qwertyBuffer.toString())
     }
 
@@ -792,9 +832,118 @@ class KbInputMethodService : InputMethodService() {
         }
     }
 
-    private fun shouldLearnNow(): Boolean =
-        !isPasswordField && !isIncognito && predictionEnabled && !isEmailOrUri &&
-            (learnByCategory[activeAssetId] ?: true)
+    /**
+     * Single construction site for both split gates (plan 12:24): the
+     * service reads editor/field state, [SnippetGates] owns the frozen
+     * truth table. `learnForTab` mirrors the pack manifest
+     * `privacy.learn` (numbers/math false).
+     */
+    private fun gateInput(): GateInput = GateInput(
+        password = isPasswordField,
+        incognito = isIncognito,
+        textClass = predictionEnabled,
+        emailOrUri = isEmailOrUri,
+        tab = activeAssetId,
+        learnForTab = learnByCategory[activeAssetId] ?: true,
+    )
+
+    private fun shouldLearnNow(): Boolean = SnippetGates.learnNow(gateInput())
+
+    /**
+     * Snippet gate (plan 12:34): like learn but exempt from
+     * `privacy.learn=false` (math helpers are the point of the tab) and
+     * from the email/URI suppression; `numbers` stays fully blocked.
+     */
+    internal fun snippetNow(): Boolean = SnippetGates.snippetNow(gateInput())
+
+    /**
+     * Recomputes the Tier-1 strip synchronously (pure map lookups, <50ms
+     * pattern): live buffer follow-tokens first, then the static palette
+     * for the active tab/prefix, capped at 6. Runs on every keystroke path
+     * so TTL expiry applies lazily with no timer thread. Empty unless
+     * [snippetNow] — a closed gate hides the strip instead of showing
+     * stale helpers.
+     */
+    internal fun refreshSnippetStrip() {
+        if (!snippetNow()) {
+            liveSnippets = emptyList()
+            return
+        }
+        val follow = snippetBuffer.peek().map {
+            SnippetItem(display = it, body = it, source = "buffer")
+        }
+        val prefix = qwertyBuffer.toString()
+        val statics = try {
+            SnippetPalettes.staticSnippets(activeAssetId, prefix)
+        } catch (e: Exception) {
+            reportGestureError("Snippet palette failed: ${e.message}")
+            emptyList()
+        }
+        liveSnippets = (follow + statics).take(6)
+    }
+
+    /**
+     * Expands a Tier-1 snippet at the cursor (plan 07 second zone).
+     *
+     * Commits [item.body] verbatim, parks the caret [SnippetItem.cursorBack]
+     * chars left via relative DPAD_LEFT presses (no absolute editor offsets
+     * stored — no tabstop field exists), then wipes the buffer
+     * (delete-after-expand). The committed text is ordinary committed text:
+     * it joins the 5s reject window and the learn path consults
+     * [shouldLearnNow] exactly like any other commit; any present-or-future
+     * clipboard capture must consult
+     * [SnippetGates.mayCaptureClipboard] first. Every failure surfaces via
+     * [gestureError] on the status line — never silent.
+     */
+    internal fun commitSnippet(item: SnippetItem) {
+        if (!snippetNow()) {
+            reportGestureError("Snippets unavailable here (numbers, password, incognito, or non-text field)")
+            return
+        }
+        val ic = currentInputConnection ?: run {
+            reportGestureError("Snippet expand failed: no input connection")
+            return
+        }
+        try {
+            ic.finishComposingText()
+            ic.commitText(item.body, 1)
+        } catch (e: Exception) {
+            reportGestureError("Snippet expand failed: ${e.message}")
+            return
+        }
+        seq.clear()
+        qwertyBuffer.clear()
+        liveCandidates = emptyList()
+        lastShown = emptyList()
+        // Delete-after-expand: the helper dies with its expansion.
+        snippetBuffer.consume()
+        if (item.cursorBack > 0) {
+            try {
+                repeat(item.cursorBack) { sendDownUpKeyEvents(KeyEvent.KEYCODE_DPAD_LEFT) }
+            } catch (e: Exception) {
+                reportGestureError("Snippet committed, caret parking failed: ${e.message}")
+            }
+        }
+        lastCommitWord = item.body
+        lastCommitTs = System.currentTimeMillis()
+        gestureLog.record("snippet", "expand", item.commit.name, item.body)
+        if (shouldLearnNow()) {
+            val p = predictor
+            if (p == null) {
+                reportGestureError("Snippet committed, learn dropped (engine loading)")
+            } else {
+                val layoutId = activeLayoutId
+                serviceScope.launch {
+                    try {
+                        learnWithLayout(p, item.body, activeAssetId, emptyList(), layoutId)
+                    } catch (e: Exception) {
+                        reportGestureError("Snippet learn failed: ${e.message}")
+                    }
+                }
+            }
+        }
+        refreshSnippetStrip()
+    }
 
     private fun commitCandidate(word: String) {
         commitCandidateWithTerminator(word, " ")
@@ -825,15 +974,33 @@ class KbInputMethodService : InputMethodService() {
             val p = predictor
             val shown = lastShown
             lastShown = emptyList()
-            if (p == null) return
-            serviceScope.launch {
-                try {
-                    learnWithLayout(p, word, activeAssetId, shown, layoutId)
-                } catch (e: Exception) {
-                    reportGestureError("Learn failed: ${e.message}")
+            if (p == null) {
+                reportGestureError("Learn dropped (engine loading): $word")
+            } else {
+                serviceScope.launch {
+                    try {
+                        learnWithLayout(p, word, activeAssetId, shown, layoutId)
+                    } catch (e: Exception) {
+                        reportGestureError("Learn failed: ${e.message}")
+                    }
                 }
             }
         }
+        // Ephemeral follow-token feed (plan 07:12): a committed trigger
+        // (`if` in js…) arms 2-3 syntax tokens for ~2min. Gated by
+        // snippetNow (never in numbers/password/incognito/non-text);
+        // failures are impossible here (pure lookup) so no error path.
+        if (snippetNow()) {
+            val follow = SnippetPalettes.followTokens(activeAssetId, word)
+            if (follow.isNotEmpty()) {
+                try {
+                    snippetBuffer.offer(word, follow)
+                } catch (e: IllegalArgumentException) {
+                    reportGestureError("Snippet feed rejected: ${e.message}")
+                }
+            }
+        }
+        refreshSnippetStrip()
     }
 
     /** Commits raw text: no prediction state, no learning (symbols/digits). */
@@ -868,6 +1035,8 @@ class KbInputMethodService : InputMethodService() {
         // reject of that word (SPEC §2 learning rule).
         maybeRejectLastCommit()
         ic.deleteSurroundingText(1, 0)
+        // Deletion can also expire helpers: sweep, no timer thread.
+        refreshSnippetStrip()
     }
 
     /** Records a reject when the user deletes within 5s of a commit. */
@@ -1127,6 +1296,12 @@ class KbInputMethodService : InputMethodService() {
             else -> tabLabel.lowercase()
         }
         liveTabLabel = activeAssetId
+        // Snippet buffer dies on tab switch (plan 12:62): helpers belong to
+        // one tab's document scratch — switching to EN hides the js strip,
+        // and coming back later finds it gone. The new tab's static palette
+        // (html/math) appears via the refresh at the end of this function.
+        snippetBuffer.clear()
+        liveSnippets = emptyList()
         // Engine re-resolves per active tab (plan/02): swap the pad when
         // the tab's layout (override -> global -> t9-9) differs. Key
         // labels re-encode from the new spec; the in-progress seq clears
@@ -1152,6 +1327,9 @@ class KbInputMethodService : InputMethodService() {
             lastShown = emptyList()
             liveCandidates = emptyList()
         }
+        // New tab's static palette (html skeletons, math flat tokens) shows
+        // immediately; buffer follow-tokens are gone (cleared above).
+        refreshSnippetStrip()
     }
 
     private fun makePad(): View = if (qwertyFallback) {

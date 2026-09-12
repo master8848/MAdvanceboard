@@ -78,6 +78,9 @@ fun ImeScreen(
     fallbackActionsVisible: Boolean = false,
     fallbackActions: FallbackActions = FallbackActions(),
     qwertyActive: Boolean = false,
+    /** Tier-1 snippet palette (plan 07 second zone, below the top-3 hits). */
+    snippets: List<SnippetItem> = emptyList(),
+    onSnippetPick: (SnippetItem) -> Unit = {},
     /** Explicit error/status line (gesture failures surface here, never silent). */
     statusLine: String? = null,
     /** Sink for overlay prefs failures (coach/footer), shown via [statusLine]. */
@@ -129,6 +132,10 @@ fun ImeScreen(
                 Text(if (qwertyActive) "9-KEY" else "QWERTY")
             }
         }
+        SnippetStrip(
+            snippets = snippets,
+            onPick = onSnippetPick
+        )
         if (deletePreviewWords > 0) {
             Text(
                 text = "Delete $deletePreviewWords word(s) — release to commit, slide back to shrink",
