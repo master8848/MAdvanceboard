@@ -56,6 +56,8 @@ import kotlinx.coroutines.delay
 @Composable
 fun ImeScreen(
     candidates: List<String> = emptyList(),
+    /** Visible tab strip: built-ins + enabled customs, `★personal` pinned last. */
+    categories: List<String> = DEFAULT_CATEGORIES,
     onCandidatePicked: (String) -> Unit,
     onExpandAll: () -> Unit = {},
     onToggleQwerty: () -> Unit = {},
@@ -82,7 +84,9 @@ fun ImeScreen(
     onError: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
-    var selectedTab by remember { mutableIntStateOf(1) }
+    var selectedTab by remember(categories) {
+        mutableIntStateOf(categories.indexOf("words").coerceAtLeast(0))
+    }
     var expanded by remember { mutableStateOf(false) }
     var coachVisible by remember {
         mutableStateOf(!GestureTuningStore.isCoachSeen(context))
@@ -93,10 +97,11 @@ fun ImeScreen(
 
     Column(modifier = Modifier.fillMaxWidth()) {
         CategoryTabs(
-            selected = selectedTab,
+            categories = categories,
+            selected = selectedTab.coerceIn(0, (categories.size - 1).coerceAtLeast(0)),
             onSelect = {
                 selectedTab = it
-                onCategoryChanged(DEFAULT_CATEGORIES.getOrElse(it) { "" })
+                onCategoryChanged(categories.getOrElse(it) { "" })
             },
             onSwipe = { from, to ->
                 onFling("tabs", if (to > from) "swipe-left" else "swipe-right", "switch-category")
@@ -140,8 +145,8 @@ fun ImeScreen(
             FallbackActionBar(
                 actions = fallbackActions.copy(
                     onNextCategory = {
-                        selectedTab = (selectedTab + 1) % DEFAULT_CATEGORIES.size
-                        onCategoryChanged(DEFAULT_CATEGORIES[selectedTab])
+                        selectedTab = (selectedTab + 1) % categories.size
+                        onCategoryChanged(categories[selectedTab])
                     }
                 )
             )

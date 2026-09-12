@@ -86,6 +86,16 @@ class KbInputMethodService : InputMethodService() {
     /** Live tab label for [ImeScreen]'s per-tab pad caption. */
     private var liveTabLabel by mutableStateOf("words")
 
+    /**
+     * Live tab strip: built-ins + enabled custom categories
+     * ([CustomPackStore]), `★personal` pinned last. Disabled customs are
+     * absent — that IS the hide-tab mechanism. Refreshed in [onCreate]
+     * and [onStartInputView] so Settings changes apply without killing
+     * the IME; a corrupt custom pack keeps the built-ins and names the
+     * cause on the status line instead of breaking the strip.
+     */
+    internal var liveTabs by mutableStateOf(DEFAULT_CATEGORIES)
+
     // -- Plan 01 gesture state (all read by ImeScreen overlays). --
     private var gestureThresholds: GestureThresholds = GestureThresholds()
     private var allowTwelveKeyFlings: Boolean = false
@@ -180,6 +190,13 @@ class KbInputMethodService : InputMethodService() {
         activeSpec = loadLayoutSpec(this, activeLayoutId)
         reloadGesturePrefs()
         flingsAllowedAT = AccessibilityGates.evaluate(this).flingsAllowed
+        liveTabs = try {
+            CustomPackValidation.resolveTabs(CustomPackStore.enabledIds(this))
+        } catch (e: Exception) {
+            android.util.Log.e("KbIME", "Custom tabs unreadable, using built-ins", e)
+            gestureError = "Custom categories unreadable: ${e.message}"
+            DEFAULT_CATEGORIES
+        }
         // Warm category learn-flags + native-lib probe off the main thread.
         serviceScope.launch {
             val ids = try {
@@ -295,12 +312,15 @@ class KbInputMethodService : InputMethodService() {
     /**
      * Extension pack envelopes (`assets/categories/<id>.json`, `words`
      * embedded by `scripts/sync_android_assets.py`) as
-     * `(packJson, priority)` for `PredictorFactory.create`. A missing
+     * `(packJson, priority)` for `PredictorFactory.create`, PLUS enabled
+     * user custom packs ([CustomPackStore]) in stack order. A missing
      * asset throws loudly — the factory turns it into a degraded engine
      * WITH the cause (status line), never a half-loaded stack. Rust-side
      * `add_pack_json` parses these envelopes as `PackFile` (extra manifest
      * fields ignored); a malformed pack or unknown layout affinity fails
-     * the whole factory decision the same loud way.
+     * the whole factory decision the same loud way. A corrupt custom pack
+     * fails the same way WITH its id (Settings validates at save, so this
+     * is defense-in-depth, not the primary check).
      */
     private fun loadExtensionPacks(): List<Pair<String, Int>> =
         EXTENSION_PACK_ASSETS.map { (path, priority) ->
@@ -310,6 +330,17 @@ class KbInputMethodService : InputMethodService() {
                 throw IllegalStateException("IME asset missing: $path (${e.message})")
             }
             text to priority
+        } + try {
+            CustomPackStore.enabledPacks(this).map { pack ->
+                if (pack.packJson.isBlank()) {
+                    throw IllegalStateException("Custom pack \"${pack.id}\": envelope empty")
+                }
+                pack.packJson to pack.priority
+            }
+        } catch (e: IllegalStateException) {
+            throw e
+        } catch (e: Exception) {
+            throw IllegalStateException("Custom packs unreadable (${e.message})")
         }
 
     /**
@@ -337,6 +368,7 @@ class KbInputMethodService : InputMethodService() {
             setContent {
                 ImeScreen(
                     candidates = liveCandidates,
+                    categories = liveTabs,
                     onCandidatePicked = { commitCandidate(it) },
                     onExpandAll = { gestureLog.record("bar", "tap-expand", "expand-all") },
                     onToggleQwerty = {
@@ -412,9 +444,18 @@ class KbInputMethodService : InputMethodService() {
         // Fresh input view: AT status is authoritative; stale errors clear.
         gestureError = if (!gate.flingsAllowed) gate.reason else null
         // Pick up Settings → Layout changes (global or per-tab) made while
-        // the IME was alive: re-resolve for the current tab.
+        // the IME was alive: re-resolve for the current tab. Same for
+        // Settings → custom categories (new/enabled/disabled tabs appear
+        // without killing the IME; the engine itself picks them up on its
+        // next init — a restart applies ranking for freshly added packs).
         val resolved = LayoutStore.layoutForCat(this, activeAssetId)
         if (resolved != activeLayoutId) setPadLayout(resolved)
+        liveTabs = try {
+            CustomPackValidation.resolveTabs(CustomPackStore.enabledIds(this))
+        } catch (e: Exception) {
+            android.util.Log.e("KbIME", "Custom tabs unreadable, keeping current strip", e)
+            liveTabs
+        }
     }
 
     override fun onFinishInput() {
