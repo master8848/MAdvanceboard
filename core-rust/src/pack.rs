@@ -155,6 +155,154 @@ pub fn load_pack(path: &std::path::Path) -> Result<PackFile, String> {
     load_pack_str(&s)
 }
 
+// ---- User custom categories (names-style packs, plan/08) ----
+
+/// User-pack priority window (plan/08): base `0` fixed bottom, personal
+/// `100` fixed top, extensions float `10-90` user-ordered.
+pub const USER_PRIORITY_MIN: i32 = 10;
+/// See [`USER_PRIORITY_MIN`].
+pub const USER_PRIORITY_MAX: i32 = 90;
+
+/// Category ids a user pack must not claim (built-in pack cats +
+/// the personal overlay).
+pub const RESERVED_CATS: &[&str] = &[
+    "words", "ne", "numbers", "js", "rust", "html", "emoji", "math", "medical", "personal",
+];
+
+/// User wordlist frequency window (matches `docs/VOCAB_SDK.md` F3).
+pub const USER_FREQ_MAX: u64 = 1_000_000;
+
+/// Check an extension priority sits in the user window `10-90`.
+/// Loud `Err`, never a silent clamp (plan/08 reorder contract).
+pub fn check_user_priority(priority: i32) -> Result<(), String> {
+    if (USER_PRIORITY_MIN..=USER_PRIORITY_MAX).contains(&priority) {
+        Ok(())
+    } else {
+        Err(format!(
+            "user pack priority {priority} out of range {USER_PRIORITY_MIN}-{USER_PRIORITY_MAX} \
+             (base 0 and personal 100 are fixed)"
+        ))
+    }
+}
+
+/// Validate a user-chosen category id: `^[a-z][a-z0-9_]{1,23}$` and not
+/// reserved. Loud `Err`, never a silent rename.
+pub fn validate_user_id(id: &str) -> Result<(), String> {
+    let mut chars = id.chars();
+    let ok = id.len() >= 2
+        && id.len() <= 24
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !ok {
+        return Err(format!(
+            "user category id {id:?} invalid: use 2-24 chars of a-z, 0-9, _ starting with a letter"
+        ));
+    }
+    if RESERVED_CATS.contains(&id) {
+        return Err(format!(
+            "user category id {id:?} invalid: reserved by a built-in pack (pick another id)"
+        ));
+    }
+    Ok(())
+}
+
+/// Parse pasted/imported wordlist text: one `word [freq]` per line.
+/// Blank lines and `#` comment lines are skipped. Returns the rows on
+/// success, or the exact per-row errors on failure — never a partial
+/// silent drop. Every row is stamped `cat`/`lang` for the new category.
+pub fn parse_user_wordlist(
+    text: &str,
+    cat: &str,
+    lang: &str,
+) -> Result<Vec<PackWord>, Vec<String>> {
+    let mut words = Vec::new();
+    let mut errs = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (idx, raw) in text.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let w = parts.next().unwrap_or("");
+        if w.is_empty() {
+            errs.push(format!("line {line_no}: missing word"));
+            continue;
+        }
+        let freq = match parts.next() {
+            None => default_freq(),
+            Some(f) => match f.parse::<u64>() {
+                Ok(n) if n >= 1 && n <= USER_FREQ_MAX => n,
+                _ => {
+                    errs.push(format!(
+                        "line {line_no} {w:?}: freq {f:?} out of range 1-{USER_FREQ_MAX}"
+                    ));
+                    continue;
+                }
+            },
+        };
+        if parts.next().is_some() {
+            errs.push(format!(
+                "line {line_no} {w:?}: expected `word [freq]`, trailing text rejected"
+            ));
+            continue;
+        }
+        let key = format!("{}\x1f{}", w.to_lowercase(), lang);
+        if !seen.insert(key) {
+            errs.push(format!("line {line_no} {w:?}: duplicate word"));
+            continue;
+        }
+        if encode_word(w).is_empty() {
+            errs.push(format!(
+                "line {line_no} {w:?}: encodes to empty seq (latin letters/digits only in wordlists)"
+            ));
+            continue;
+        }
+        words.push(PackWord {
+            w: w.to_string(),
+            freq,
+            cat: Some(cat.to_string()),
+            lang: Some(lang.to_string()),
+            seq: None,
+            tr: None,
+            alt: Vec::new(),
+        });
+    }
+    if words.is_empty() && errs.is_empty() {
+        errs.push("wordlist is empty: add one `word [freq]` per line".to_string());
+    }
+    if errs.is_empty() { Ok(words) } else { Err(errs) }
+}
+
+/// Build a first-class user pack from an id, title, and wordlist text.
+/// Fails loudly (joined per-row diagnostics) so a half-loaded category
+/// never ships silently.
+pub fn build_user_pack(id: &str, title: &str, text: &str, lang: &str) -> Result<PackFile, String> {
+    validate_user_id(id)?;
+    if title.trim().is_empty() {
+        return Err("user pack title must not be empty".to_string());
+    }
+    let words = parse_user_wordlist(text, id, lang)
+        .map_err(|errs| format!("user pack {id:?} invalid ({} problem(s)): {}", errs.len(), errs.join("; ")))?;
+    let pack = PackFile {
+        id: id.to_string(),
+        title: title.to_string(),
+        version: "1.0.0".to_string(),
+        words,
+        layout: None,
+    };
+    let problems = pack.validate();
+    if !problems.is_empty() {
+        return Err(format!(
+            "user pack {id:?} invalid ({} problem(s)): {}",
+            problems.len(),
+            problems.join("; ")
+        ));
+    }
+    Ok(pack)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +399,61 @@ mod tests {
     #[test]
     fn rejects_invalid() {
         assert!(load_pack_str(r#"{"nope":true}"#).is_err());
+    }
+
+    #[test]
+    fn user_id_rules_are_loud() {
+        assert!(validate_user_id("names").is_ok());
+        assert!(validate_user_id("my_names2").is_ok());
+        for bad in ["", "N", "names!", "1names", "a", "names with space", "UPPER"] {
+            assert!(validate_user_id(bad).is_err(), "id {bad:?} must fail");
+        }
+        for reserved in ["words", "ne", "personal", "medical"] {
+            let err = validate_user_id(reserved).unwrap_err();
+            assert!(err.contains("reserved"), "unexpected: {err}");
+        }
+    }
+
+    #[test]
+    fn user_priority_window_10_to_90() {
+        assert!(check_user_priority(10).is_ok());
+        assert!(check_user_priority(50).is_ok());
+        assert!(check_user_priority(90).is_ok());
+        for bad in [0, 9, 91, 100, -1] {
+            assert!(check_user_priority(bad).is_err(), "priority {bad} must fail");
+        }
+    }
+
+    #[test]
+    fn user_wordlist_parses_word_freq_lines() {
+        let words = parse_user_wordlist("# contacts\nava 9000\nbob\n", "names", "en").unwrap();
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].w, "ava");
+        assert_eq!(words[0].freq, 9000);
+        assert_eq!(words[0].cat.as_deref(), Some("names"));
+        assert_eq!(words[1].freq, 100);
+    }
+
+    #[test]
+    fn user_wordlist_bad_rows_fail_loudly_never_silently() {
+        let err = parse_user_wordlist("ava 9000\nava 100\nbob 0\n*\nbob 100 extra\n", "names", "en")
+            .unwrap_err();
+        assert_eq!(err.len(), 4, "one error per bad row, got {err:?}");
+        assert!(err.iter().any(|e| e.contains("duplicate")), "{err:?}");
+        assert!(err.iter().any(|e| e.contains("out of range")), "{err:?}");
+        assert!(err.iter().any(|e| e.contains("empty seq")), "{err:?}");
+        assert!(err.iter().any(|e| e.contains("trailing text")), "{err:?}");
+        assert!(parse_user_wordlist("", "names", "en").unwrap_err()[0].contains("empty"));
+    }
+
+    #[test]
+    fn build_user_pack_end_to_end() {
+        let pack = build_user_pack("names", "Names", "ava 9000\nbob 8000\n", "en").unwrap();
+        assert_eq!(pack.id, "names");
+        assert!(pack.validate().is_empty());
+        assert_eq!(pack.to_entries(50).len(), 2);
+        assert!(build_user_pack("words", "Taken", "ava\n", "en").is_err());
+        assert!(build_user_pack("names", "", "ava\n", "en").is_err());
+        assert!(build_user_pack("names", "Names", "ava 0\n", "en").is_err());
     }
 }
