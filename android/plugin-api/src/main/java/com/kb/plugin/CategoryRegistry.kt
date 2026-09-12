@@ -35,6 +35,10 @@ object CategoryRegistry {
      * Prefer [loadManifestsStrict] — it returns the same entries PLUS the
      * per-id [CategoryLoadError]s this method drops.
      */
+    @Deprecated(
+        "Silent skips hide corrupt tabs; use loadManifestsStrict and surface errors.",
+        ReplaceWith("loadManifestsStrict(assetManager, ids).loaded")
+    )
     fun loadManifests(assetManager: AssetManager, ids: List<String>): List<CategoryManifest> =
         loadManifestsStrict(assetManager, ids).loaded
 
@@ -64,6 +68,10 @@ object CategoryRegistry {
      * Lenient single load (kept for compat): null on any failure. Prefer
      * [loadManifestsStrict] for the explicit per-id cause.
      */
+    @Deprecated(
+        "Silent null hides the cause; use loadManifestsStrict and surface errors.",
+        ReplaceWith("loadManifestsStrict(assetManager, listOf(id))")
+    )
     fun loadOne(assetManager: AssetManager, id: String): CategoryManifest? {
         return try {
             assetManager.open("categories/$id.json").bufferedReader().use { reader ->
