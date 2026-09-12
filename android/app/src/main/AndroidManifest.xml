@@ -15,5 +15,9 @@
         <activity
             android:name=".OnboardingActivity"
             android:exported="true" />
+        <!-- ADB smoke fixture (no launcher entry): `adb shell am start -n com.kb.app/.SmokeActivity`. -->
+        <activity
+            android:name=".SmokeActivity"
+            android:exported="true" />
     </application>
 </manifest>

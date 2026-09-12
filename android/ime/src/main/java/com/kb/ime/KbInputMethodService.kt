@@ -199,6 +199,7 @@ class KbInputMethodService : InputMethodService() {
      */
     private fun initEngine() {
         engineStatus = "Engine loading…"
+        val t0 = System.currentTimeMillis()
         serviceScope.launch {
             val decision = try {
                 val baseJson = loadBaseWordlist()
@@ -212,9 +213,17 @@ class KbInputMethodService : InputMethodService() {
             }
             predictor = decision.predictor
             when (decision) {
-                is PredictorFactory.Decision.Real -> engineStatus = null
+                is PredictorFactory.Decision.Real -> {
+                    engineStatus = null
+                    android.util.Log.i(
+                        "KbIME",
+                        "Rust engine live in ${System.currentTimeMillis() - t0}ms " +
+                            "(KbCore.available=${KbCore.isAvailable()})"
+                    )
+                }
                 is PredictorFactory.Decision.Degraded -> {
                     engineStatus = decision.reason
+                    android.util.Log.e("KbIME", "Engine degraded: ${decision.reason}")
                     try {
                         gestureLog.record("engine", "init", "degraded", decision.reason)
                     } catch (_: Exception) {
