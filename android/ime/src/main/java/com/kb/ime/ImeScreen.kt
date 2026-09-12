@@ -98,6 +98,9 @@ fun ImeScreen(
                 selectedTab = it
                 onCategoryChanged(DEFAULT_CATEGORIES.getOrElse(it) { "" })
             },
+            onSwipe = { from, to ->
+                onFling("tabs", if (to > from) "swipe-left" else "swipe-right", "switch-category")
+            },
             onExpandAll = {
                 expanded = true
                 onExpandAll()
