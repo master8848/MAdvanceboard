@@ -1,5 +1,6 @@
 package com.kb.ime
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -27,6 +28,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -104,6 +106,27 @@ fun ImeScreen(
     /** Tier-1 snippet palette (plan 07 second zone, below the top-3 hits). */
     snippets: List<SnippetItem> = emptyList(),
     onSnippetPick: (SnippetItem) -> Unit = {},
+    /**
+     * Plan/11 incognito + clipboard (all optional, all with visible UI):
+     * - [incognito]: dark strip + mask badge (system, manual, or password auto-on).
+     * - [incognitoBannerVisible]/[onDismissIncognitoBanner]: entry banner.
+     * - [onToggleIncognito]: mask-key toggle (no-persist flag in the host).
+     * - [clipboardVisible]/[clipboardItems] + callbacks: history panel
+     *   (hidden while [incognito] — the host also empties the list).
+     */
+    incognito: Boolean = false,
+    incognitoBannerVisible: Boolean = false,
+    onToggleIncognito: () -> Unit = {},
+    onDismissIncognitoBanner: () -> Unit = {},
+    clipboardVisible: Boolean = false,
+    clipboardItems: List<ClipboardItem> = emptyList(),
+    onToggleClipboard: () -> Unit = {},
+    onDismissClipboard: () -> Unit = {},
+    onClipboardPaste: (ClipboardItem) -> Unit = {},
+    onClipboardTogglePin: (ClipboardItem) -> Unit = {},
+    onClipboardDelete: (ClipboardItem) -> Unit = {},
+    onClipboardClearUnpinned: () -> Unit = {},
+    onClipboardClearAll: () -> Unit = {},
     /** Explicit error/status line (gesture failures surface here, never silent). */
     statusLine: String? = null,
     /** Sink for overlay prefs failures (coach/footer), shown via [statusLine]. */
@@ -121,7 +144,14 @@ fun ImeScreen(
         mutableStateOf(GestureTuningStore.showFooterHint(context))
     }
 
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(if (incognito) DarkIncognito else Color.Transparent)
+    ) {
+        if (incognito && incognitoBannerVisible) {
+            IncognitoBanner(onDismiss = onDismissIncognitoBanner)
+        }
         CategoryTabs(
             categories = categories,
             selected = selectedTab.coerceIn(0, (categories.size - 1).coerceAtLeast(0)),
@@ -155,6 +185,29 @@ fun ImeScreen(
             TextButton(onClick = onToggleQwerty) {
                 Text(if (qwertyActive) "9-KEY" else "QWERTY")
             }
+            // Mask-key manual incognito toggle (plan/11 §2): bracketed when
+            // active. Clipboard toggle beside it (hidden while incognito —
+            // the host empties the list AND refuses to open the panel).
+            TextButton(onClick = onToggleIncognito) {
+                Text(if (incognito) "[🎭]" else "🎭")
+            }
+            if (!incognito) {
+                TextButton(onClick = onToggleClipboard) {
+                    Text(if (clipboardVisible) "[📋]" else "📋")
+                }
+            }
+        }
+        if (clipboardVisible && !incognito) {
+            ClipboardPanel(
+                items = clipboardItems,
+                onPaste = onClipboardPaste,
+                onTogglePin = onClipboardTogglePin,
+                onDelete = onClipboardDelete,
+                onClearUnpinned = onClipboardClearUnpinned,
+                onClearAll = onClipboardClearAll,
+                onClose = onDismissClipboard,
+                onError = onError
+            )
         }
         SnippetStrip(
             snippets = snippets,

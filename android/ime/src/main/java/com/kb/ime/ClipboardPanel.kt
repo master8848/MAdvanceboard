@@ -25,6 +25,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 /**
+ * Shared incognito chrome color: dark strip + banner, unmistakable under
+ * any theme (plan/11 §2 visual requirement).
+ */
+internal val DarkIncognito = Color(0xFF1B1B1F)
+
+/**
  * Incognito entry banner (plan/11 §2): dark strip badge + explicit
  * "nothing saved" notice. Dismissible; re-arms on the next incognito
  * entry (the host owns that state). Rendered dark even under a light
@@ -38,7 +44,7 @@ fun IncognitoBanner(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xFF1B1B1F))
+            .background(DarkIncognito)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {

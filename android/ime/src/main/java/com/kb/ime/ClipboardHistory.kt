@@ -48,11 +48,12 @@ object ClipboardHistory {
     }
 
     /**
-     * Capture gate: exactly the two plan/11 exclusions. Callers pass the
-     * field state; blank/overlong handling lives in [sanitize].
+     * Capture gate: exactly the two plan/11 exclusions. Delegates to
+     * [SnippetGates.mayCaptureClipboard] (single frozen definition, shared
+     * with the service) so the rule cannot drift between module and host.
      */
     fun shouldCapture(isPasswordField: Boolean, isIncognito: Boolean): Boolean =
-        !isPasswordField && !isIncognito
+        SnippetGates.mayCaptureClipboard(isPasswordField, isIncognito)
 
     /**
      * Sanitizes raw clipboard text. Returns null for blanks (nothing to

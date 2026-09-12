@@ -1,5 +1,6 @@
 package com.kb.ime
 
+import android.content.ClipboardManager
 import android.content.Context
 import android.inputmethodservice.InputMethodService
 import android.os.Build
@@ -59,6 +60,29 @@ class KbInputMethodService : InputMethodService() {
     private var cachedInputView: View? = null
     private var isPasswordField: Boolean = false
     private var isIncognito: Boolean = false
+    /**
+     * Manual incognito toggle (plan/11 §2, mask key in the strip). OR'd
+     * with the system flag in [gateInput], so it rides the SAME learn /
+     * snippet / clipboard-capture gates ([SnippetGates]) — no parallel
+     * path, no drift. Never persisted: always starts OFF unless the app
+     * requests incognito (plan/11 §2 no-persist rule).
+     */
+    internal var manualIncognito: Boolean = false
+    /** Dark-strip + badge state: system OR manual incognito OR password auto-on. */
+    private var incognitoUi by mutableStateOf(false)
+    /** Entry banner ("nothing saved"); re-arms on every incognito entry. */
+    private var incognitoBannerVisible by mutableStateOf(false)
+    private var wasIncognitoEffective = false
+    /**
+     * Clipboard history, RAM-first ([ClipboardStore] persists swept).
+     * Emptied (hidden, NOT deleted) while incognito-effective; reloaded
+     * from the store on exit (plan/11 §2).
+     */
+    internal var liveClipboard by mutableStateOf(emptyList<ClipboardItem>())
+    private var clipboardPanelVisible by mutableStateOf(false)
+    /** True between onStartInputView/onFinishInputView: capture window for system-clipboard changes. */
+    private var keyboardActive = false
+    private var clipboardListener: ClipboardManager.OnPrimaryClipChangedListener? = null
     private var isEmailOrUri: Boolean = false
     private var predictionEnabled: Boolean = true
     private var inputMode: InputMode = InputMode.TEXT
@@ -247,6 +271,8 @@ class KbInputMethodService : InputMethodService() {
             val nativeAvailable = KbCore.isAvailable()
         }
         initEngine()
+        reloadClipboardVisible()
+        watchSystemClipboard()
     }
 
     /**
@@ -458,7 +484,20 @@ class KbInputMethodService : InputMethodService() {
                     onError = { gestureError = it },
                     qwertyActive = qwertyFallback,
                     snippets = liveSnippets,
-                    onSnippetPick = { commitSnippet(it) }
+                    onSnippetPick = { commitSnippet(it) },
+                    incognito = incognitoUi,
+                    incognitoBannerVisible = incognitoBannerVisible,
+                    onToggleIncognito = { toggleManualIncognito() },
+                    onDismissIncognitoBanner = { dismissIncognitoBanner() },
+                    clipboardVisible = clipboardPanelVisible,
+                    clipboardItems = liveClipboard,
+                    onToggleClipboard = { toggleClipboardPanel() },
+                    onDismissClipboard = { dismissClipboardPanel() },
+                    onClipboardPaste = { pasteClipboardItem(it) },
+                    onClipboardTogglePin = { toggleClipboardPin(it) },
+                    onClipboardDelete = { deleteClipboardItem(it) },
+                    onClipboardClearUnpinned = { clearClipboardUnpinned() },
+                    onClipboardClearAll = { clearClipboardAll() }
                 )
             }
         }
@@ -484,10 +523,13 @@ class KbInputMethodService : InputMethodService() {
         // Split-gate hygiene (plan 12:62): a password field or an incognito
         // session wipes the snippet buffer on entry (no TTL carryover) and
         // hides the strip. Exit needs no action — the buffer is already gone.
-        if (isPasswordField || isIncognito) {
+        // Manual incognito joins the same condition ([refreshIncognitoState]
+        // then handles clipboard hide/banner for all three triggers).
+        if (isPasswordField || isIncognito || manualIncognito) {
             snippetBuffer.clear()
             liveSnippets = emptyList()
         }
+        refreshIncognitoState()
         seq.clear()
         qwertyBuffer.clear()
     }
@@ -495,6 +537,7 @@ class KbInputMethodService : InputMethodService() {
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         imeLifecycleOwner.handle(Lifecycle.Event.ON_RESUME)
+        keyboardActive = true
         // Layout already reflects inputMode via predictionEnabled (raw commit when
         // false). Pad swaps only happen on explicit QWERTY toggle to avoid desync.
         // Re-read Tuning + AT state so Settings changes apply without IME restart.
@@ -555,6 +598,7 @@ class KbInputMethodService : InputMethodService() {
 
     override fun onFinishInputView(finishingInput: Boolean) {
         imeLifecycleOwner.handle(Lifecycle.Event.ON_PAUSE)
+        keyboardActive = false
         try {
             currentInputConnection?.finishComposingText()
         } catch (_: Exception) {
@@ -582,6 +626,14 @@ class KbInputMethodService : InputMethodService() {
     override fun onDestroy() {
         serviceScope.cancel()
         imeLifecycleOwner.handle(Lifecycle.Event.ON_DESTROY)
+        try {
+            (getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager)
+                ?.removePrimaryClipChangedListener(clipboardListener)
+        } catch (_: Exception) {
+        }
+        clipboardListener = null
+        // manualIncognito is intentionally NOT persisted (plan/11 §2:
+        // always start non-incognito unless the app requests it).
         try {
             predictor?.close()
         } catch (_: Exception) {
@@ -869,7 +921,7 @@ class KbInputMethodService : InputMethodService() {
 
     /** Previous-word context for bigrams; null under no-learn (no harvesting). */
     private fun prevWord(): String? {
-        if (isPasswordField || isIncognito) return null
+        if (isPasswordField || isIncognito || manualIncognito) return null
         return try {
             currentInputConnection?.getTextBeforeCursor(CURSOR_CONTEXT_CHARS, 0)?.toString()
                 ?.split(Regex("\\s+"))?.lastOrNull()?.takeIf { it.isNotEmpty() }
@@ -886,7 +938,9 @@ class KbInputMethodService : InputMethodService() {
      */
     private fun gateInput(): GateInput = GateInput(
         password = isPasswordField,
-        incognito = isIncognito,
+        // Manual toggle joins the system flag here (plan/11 §2): one gate
+        // for learn + snippet + clipboard-capture, no parallel path.
+        incognito = isIncognito || manualIncognito,
         textClass = predictionEnabled,
         emailOrUri = isEmailOrUri,
         tab = activeAssetId,
@@ -901,6 +955,223 @@ class KbInputMethodService : InputMethodService() {
      * from the email/URI suppression; `numbers` stays fully blocked.
      */
     internal fun snippetNow(): Boolean = SnippetGates.snippetNow(gateInput())
+
+    // -- Plan/11 incognito + clipboard history. --
+
+    /** Effective incognito: system flag OR manual toggle; password fields auto-on. */
+    private fun isIncognitoEffective(): Boolean =
+        isIncognito || manualIncognito || isPasswordField
+
+    /**
+     * Mask-key toggle (plan/11 §2). Entry: snippet buffer wiped (no TTL
+     * carryover), candidates/symbols cleared, visible clipboard emptied
+     * (persisted history HIDDEN, not deleted), banner armed. Exit: snippet
+     * buffer wiped again, visible history reloaded swept from the store.
+     * The flag itself is never persisted.
+     */
+    internal fun toggleManualIncognito() {
+        manualIncognito = !manualIncognito
+        gestureLog.record(
+            "incognito", if (manualIncognito) "enter" else "exit", "manual-toggle"
+        )
+        refreshIncognitoState()
+    }
+
+    internal fun dismissIncognitoBanner() {
+        incognitoBannerVisible = false
+    }
+
+    /**
+     * Recomputes incognito UI + hide/restore on every trigger change
+     * ([onStartInput] covers field switches; [toggleManualIncognito]
+     * covers the mask key). Entering hides; exiting restores swept.
+     */
+    private fun refreshIncognitoState() {
+        val effective = isIncognitoEffective()
+        val entering = effective && !wasIncognitoEffective
+        val exiting = !effective && wasIncognitoEffective
+        wasIncognitoEffective = effective
+        incognitoUi = effective
+        if (entering) {
+            snippetBuffer.clear()
+            liveSnippets = emptyList()
+            liveCandidates = emptyList()
+            symbolsOptions = emptyList()
+            symbolsTitle = ""
+            // Hidden, not deleted: the persisted store is untouched.
+            liveClipboard = emptyList()
+            clipboardPanelVisible = false
+            incognitoBannerVisible = true
+        }
+        if (exiting) {
+            // No TTL carryover in either direction.
+            snippetBuffer.clear()
+            liveSnippets = emptyList()
+            incognitoBannerVisible = false
+            reloadClipboardVisible()
+        }
+    }
+
+    internal fun toggleClipboardPanel() {
+        if (isIncognitoEffective()) {
+            // History is hidden while incognito — the toggle says so
+            // instead of opening an empty panel.
+            reportGestureError("Clipboard hidden while incognito — nothing saved")
+            return
+        }
+        clipboardPanelVisible = !clipboardPanelVisible
+    }
+
+    internal fun dismissClipboardPanel() {
+        clipboardPanelVisible = false
+    }
+
+    /** Swept reload of the visible list (startup + incognito exit). */
+    private fun reloadClipboardVisible() {
+        liveClipboard = try {
+            ClipboardStore.load(this)
+        } catch (e: Exception) {
+            reportGestureError("Clipboard history unreadable, starting empty: ${e.message}")
+            emptyList()
+        }
+    }
+
+    private fun persistClipboard() {
+        try {
+            ClipboardStore.save(this, liveClipboard)
+            // Re-read swept so the visible list matches storage exactly.
+            liveClipboard = ClipboardHistory.ordered(
+                ClipboardHistory.sweep(liveClipboard, ClipboardStore.ttlHours(this), System.currentTimeMillis())
+            )
+        } catch (e: Exception) {
+            reportGestureError("Clipboard save failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Captures IME-committed plaintext ([SnippetGates.mayCaptureClipboard]
+     * first — password/incognito sessions never store, never show).
+     * Pastes are raw commits, so captured text can never loop back
+     * through the learn path.
+     */
+    private fun captureOwnCommit(text: String) {
+        if (!SnippetGates.mayCaptureClipboard(isPasswordField, isIncognito || manualIncognito)) return
+        try {
+            val now = System.currentTimeMillis()
+            liveClipboard = ClipboardHistory.ordered(
+                ClipboardHistory.sweep(
+                    ClipboardHistory.add(liveClipboard, text, now),
+                    ClipboardStore.ttlHours(this), now
+                )
+            )
+            ClipboardStore.save(this, liveClipboard, now)
+        } catch (e: Exception) {
+            reportGestureError("Clipboard capture failed: ${e.message}")
+        }
+    }
+
+    /** Watches system-clipboard changes while the keyboard is active. */
+    private fun watchSystemClipboard() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: run {
+            reportGestureError("Clipboard unavailable: no clipboard service")
+            return
+        }
+        val listener = ClipboardManager.OnPrimaryClipChangedListener {
+            captureSystemClipboard(cm)
+        }
+        try {
+            cm.addPrimaryClipChangedListener(listener)
+            clipboardListener = listener
+        } catch (e: Exception) {
+            reportGestureError("Clipboard watch failed: ${e.message}")
+        }
+    }
+
+    private fun captureSystemClipboard(cm: ClipboardManager) {
+        if (!keyboardActive) return
+        if (!SnippetGates.mayCaptureClipboard(isPasswordField, isIncognito || manualIncognito)) return
+        try {
+            val text = cm.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()
+            val clean = ClipboardHistory.sanitize(text) ?: return
+            val now = System.currentTimeMillis()
+            liveClipboard = ClipboardHistory.ordered(
+                ClipboardHistory.sweep(
+                    ClipboardHistory.add(liveClipboard, clean, now),
+                    ClipboardStore.ttlHours(this), now
+                )
+            )
+            ClipboardStore.save(this, liveClipboard, now)
+        } catch (e: Exception) {
+            reportGestureError("Clipboard capture failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Pastes a history item RAW (no learn, no bigram, no session log, no
+     * reject-window tracking — clipboard content never feeds memory).
+     * Allowed into any field the user opens the panel in (the panel itself
+     * is unreachable while incognito-effective).
+     */
+    internal fun pasteClipboardItem(item: ClipboardItem) {
+        val ic = currentInputConnection ?: run {
+            reportGestureError("Paste failed: no input connection")
+            return
+        }
+        try {
+            ic.finishComposingText()
+            ic.commitText(item.text, 1)
+        } catch (e: Exception) {
+            reportGestureError("Paste failed: ${e.message}")
+            return
+        }
+        seq.clear()
+        qwertyBuffer.clear()
+        liveCandidates = emptyList()
+        clipboardPanelVisible = false
+        gestureLog.record("clipboard", "paste", if (item.pinned) "pinned" else "recent")
+    }
+
+    internal fun toggleClipboardPin(item: ClipboardItem) {
+        try {
+            liveClipboard = ClipboardHistory.ordered(
+                ClipboardHistory.setPinned(liveClipboard, item.id, !item.pinned)
+            )
+            persistClipboard()
+            gestureLog.record("clipboard", if (item.pinned) "unpin" else "pin", item.id)
+        } catch (e: Exception) {
+            reportGestureError("Pin failed: ${e.message}")
+        }
+    }
+
+    internal fun deleteClipboardItem(item: ClipboardItem) {
+        try {
+            liveClipboard = ClipboardHistory.delete(liveClipboard, item.id)
+            persistClipboard()
+            gestureLog.record("clipboard", "delete", item.id)
+        } catch (e: Exception) {
+            reportGestureError("Delete failed: ${e.message}")
+        }
+    }
+
+    /** Clear-all keeping pins (confirm dialog's "Keep pins"). */
+    internal fun clearClipboardUnpinned() {
+        try {
+            liveClipboard = ClipboardStore.clear(this, liveClipboard, includePins = false)
+            gestureLog.record("clipboard", "clear", "keep-pins")
+        } catch (e: Exception) {
+            reportGestureError("Clear failed: ${e.message}")
+        }
+    }
+
+    /** Clear-all including pins (confirm dialog's "Clear everything"). */
+    internal fun clearClipboardAll() {
+        try {
+            liveClipboard = ClipboardStore.clear(this, liveClipboard, includePins = true)
+            gestureLog.record("clipboard", "clear", "include-pins")
+        } catch (e: Exception) {
+            reportGestureError("Clear failed: ${e.message}")
+        }
+    }
 
     /**
      * Recomputes the Tier-1 strip synchronously (pure map lookups, <50ms
@@ -972,6 +1243,9 @@ class KbInputMethodService : InputMethodService() {
         }
         lastCommitWord = item.body
         lastCommitTs = System.currentTimeMillis()
+        // Snippet-committed text is ordinary committed text: clipboard
+        // capture consults mayCaptureClipboard exactly like any commit.
+        captureOwnCommit(item.body)
         gestureLog.record("snippet", "expand", item.commit.name, item.body)
         if (shouldLearnNow()) {
             val p = predictor
@@ -1011,6 +1285,9 @@ class KbInputMethodService : InputMethodService() {
         liveCandidates = emptyList()
         lastCommitWord = word
         lastCommitTs = System.currentTimeMillis()
+        // Clipboard history (plan/11 §3): committed plaintext is captured
+        // under the mayCaptureClipboard gate (never password/incognito).
+        captureOwnCommit("$text$terminator")
         // Fire-and-forget learn on Dispatchers.Default inside Predictor,
         // gated on password + incognito + input class + category.
         // Category is the pack id (activeAssetId), NOT the ctx-prev word;
