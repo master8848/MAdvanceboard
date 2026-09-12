@@ -490,6 +490,41 @@ impl SuggestOpts {
             ..Default::default()
         }
     }
+
+    /// Tabs whose vocabularies are code identifiers, not prose: cross-tab
+    /// prose distractors dominate their unions (measured held-out ON-arm
+    /// +0.59 js / +0.55 medical under the hard filter; EN/NE
+    /// unaffected-to-positive), so the production policy scopes them hard.
+    pub fn is_code_tab(active_tab: &str) -> bool {
+        matches!(active_tab, "js" | "medical")
+    }
+
+    /// Production suggest policy per tab (Tier-0 NO-GO follow-up outcome):
+    /// neighbor matching defaults OFF on every tab (+12.5pts scope top-3@4
+    /// on held-out, wins all four tabs) and code tabs additionally scope
+    /// the union to the active tab before the truncate. Frozen entry points
+    /// (`suggest_at`, `SuggestOpts::default()`) are untouched — this is the
+    /// vehicle the keyboard actually types through.
+    ///
+    /// Per-tab neighbor opt-in lives here, not in a global toggle: pass
+    /// `.with_neighbor(true)` for a tab only after a mis-press corpus
+    /// clears 09#6's ≥30% failed-commit-reduction bar. No tab has cleared
+    /// it, so none opts in today.
+    pub fn policy_for_tab(active_tab: &str) -> Self {
+        Self {
+            include_neighbor: false,
+            hard_tab_filter: Self::is_code_tab(active_tab),
+            ..Default::default()
+        }
+    }
+
+    /// Per-tab neighbor override (see [`Self::policy_for_tab`]): the caller
+    /// picks `include_neighbor` per tab and the choice stays explicit and
+    /// measurable at the call site, never a silent global.
+    pub fn with_neighbor(mut self, on: bool) -> Self {
+        self.include_neighbor = on;
+        self
+    }
 }
 
 /// Where a gate miss lost its target in the suggest pipeline (step-1
@@ -1044,6 +1079,34 @@ impl DictionaryStack {
         )
     }
 
+    /// Production policy entry point (frozen `t9-9` path): applies
+    /// [`SuggestOpts::policy_for_tab`] for `active_tab` (neighbor OFF;
+    /// hard tab filter on code tabs). Same quantization contract as
+    /// [`Self::suggest_at`]. This is what the keyboard types through;
+    /// the frozen arms above stay byte-identical for gate measurement.
+    pub fn suggest_policy(
+        &self,
+        ctx: &str,
+        digits: &str,
+        active_tab: &str,
+        limit: usize,
+    ) -> Vec<Suggestion> {
+        self.suggest_policy_at(ctx, digits, active_tab, limit, now_quantized())
+    }
+
+    /// Deterministic production-policy entry point (see [`Self::suggest_at`]).
+    pub fn suggest_policy_at(
+        &self,
+        ctx: &str,
+        digits: &str,
+        active_tab: &str,
+        limit: usize,
+        now: i64,
+    ) -> Vec<Suggestion> {
+        let opts = SuggestOpts::policy_for_tab(active_tab);
+        self.suggest_with_opts_at(ctx, digits, active_tab, limit, now, &opts)
+    }
+
     /// Step-1 miss instrumentation: where `target` is lost in the pipeline
     /// for (`ctx`, `digits`, tab) under `opts` (frozen `t9-9` path, same
     /// quantization contract as [`Self::suggest_at`]). The union is built by
@@ -1252,6 +1315,64 @@ impl DictionaryStack {
                 mapping,
                 &SuggestOpts::neighbor_off(),
                 &|_, _| false,
+                &|c| mapping.contains_code(c),
+                now,
+            )
+        }
+    }
+
+    /// Production policy under an explicit layout: per-tab policy opts
+    /// ([`SuggestOpts::policy_for_tab`]) with the layout's own neighbor
+    /// graph when a tab opts back in (none has — see `policy_for_tab`).
+    /// Deterministic entry point (see [`Self::suggest_at`]).
+    pub fn suggest_for_layout_policy_at(
+        &self,
+        ctx: &str,
+        digits: &str,
+        mapping: &dyn KeyMapping,
+        active_tab: &str,
+        limit: usize,
+        now: i64,
+    ) -> Vec<Suggestion> {
+        let opts = SuggestOpts::policy_for_tab(active_tab);
+        let layout_id = mapping.layout_id();
+        // Neighbor generation is skipped entirely while no tab opts in;
+        // the opt-in arm passes the layout graph through so a future
+        // per-tab opt-in measures the real layout-aware fuzzy set.
+        let neighbor_on = opts.include_neighbor;
+        if PRECOMPUTED_LAYOUTS.contains(&layout_id) {
+            self.suggest_inner(
+                ctx,
+                digits,
+                active_tab,
+                limit,
+                layout_id,
+                &|e| {
+                    (
+                        Cow::Borrowed(e.seq_for_layout(layout_id)),
+                        Cow::Borrowed(e.aliases_for_layout(layout_id)),
+                    )
+                },
+                mapping,
+                &opts,
+                &|a, b| neighbor_on && mapping.is_one_edit_neighbor(a, b),
+                &|c| mapping.contains_code(c),
+                now,
+            )
+        } else {
+            self.suggest_inner(
+                ctx,
+                digits,
+                active_tab,
+                limit,
+                layout_id,
+                &|e| {
+                    let (primary, aliases) = e.custom_seqs(mapping);
+                    (Cow::Owned(primary), Cow::Owned(aliases))
+                },
+                mapping,
+                &opts,
+                &|a, b| neighbor_on && mapping.is_one_edit_neighbor(a, b),
                 &|c| mapping.contains_code(c),
                 now,
             )
@@ -2009,6 +2130,125 @@ mod tests {
                 "neighbor-off parity at {digits}",
             );
         }
+    }
+
+    #[test]
+    fn policy_defaults_to_neighbor_off_everywhere() {
+        // No tab has cleared 09#6's ≥30% mis-press bar, so every tab ships
+        // neighbor-OFF until a per-tab opt-in is measured.
+        for tab in ["EN", "words", "NE", "js", "medical", "personal", "emoji"] {
+            let opts = SuggestOpts::policy_for_tab(tab);
+            assert!(
+                !opts.include_neighbor,
+                "policy must default neighbor OFF for tab {tab:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_hard_filters_only_code_tabs() {
+        for tab in ["js", "medical"] {
+            assert!(SuggestOpts::is_code_tab(tab), "{tab:?} is a code tab");
+            assert!(
+                SuggestOpts::policy_for_tab(tab).hard_tab_filter,
+                "policy must hard-filter {tab:?}"
+            );
+        }
+        for tab in ["EN", "words", "NE", "personal", "emoji", ""] {
+            assert!(!SuggestOpts::is_code_tab(tab), "{tab:?} is not a code tab");
+            assert!(
+                !SuggestOpts::policy_for_tab(tab).hard_tab_filter,
+                "policy must not hard-filter {tab:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_matches_off_arm_on_prose_tabs() {
+        // On non-code tabs the policy IS the neighbor-OFF arm exactly.
+        let stack = DictionaryStack::new(base());
+        let now = crate::personal::now_quantized();
+        let words = |s: Vec<Suggestion>| {
+            s.into_iter().map(|x| (x.word, x.score.to_bits())).collect::<Vec<_>>()
+        };
+        for digits in ["4", "43", "435", "4355", "43556", "43555"] {
+            assert_eq!(
+                words(stack.suggest_policy_at("", digits, "EN", 5, now)),
+                words(stack.suggest_no_neighbor_at("", digits, "EN", 5, now)),
+                "policy must equal OFF arm at {digits}",
+            );
+        }
+    }
+
+    #[test]
+    fn policy_hard_filter_scopes_code_tabs() {
+        // EN "hello"(43556, freq 900) outranks js "hellx"(43559, freq 50)
+        // at prefix 4355 under the unfiltered OFF arm; the js-tab policy
+        // must scope the union to js rows only.
+        let entries = DictionaryStack::load_base_json(
+            r#"[{"w":"hello","freq":900,"cat":"EN"},
+                {"w":"hellx","freq":50,"cat":"js"}]"#,
+        )
+        .unwrap();
+        let stack = DictionaryStack::new(entries);
+        let now = crate::personal::now_quantized();
+        let unfiltered = stack.suggest_no_neighbor_at("", "4355", "js", 5, now);
+        assert!(
+            unfiltered.iter().any(|s| s.cat == "EN"),
+            "fixture needs EN cross-tab noise, got {:?}",
+            unfiltered.iter().map(|s| &s.word).collect::<Vec<_>>()
+        );
+        let policy = stack.suggest_policy_at("", "4355", "js", 5, now);
+        assert!(!policy.is_empty(), "js policy must keep the js row");
+        assert!(
+            policy.iter().all(|s| s.cat == "js"),
+            "hard filter must drop EN rows, got {:?}",
+            policy.iter().map(|s| &s.word).collect::<Vec<_>>()
+        );
+        assert_eq!(policy[0].word, "hellx");
+        // And the policy entry point equals the explicit opts arm.
+        let explicit = stack.suggest_with_opts_at(
+            "",
+            "4355",
+            "js",
+            5,
+            now,
+            &SuggestOpts::policy_for_tab("js"),
+        );
+        assert_eq!(
+            policy.iter().map(|s| &s.word).collect::<Vec<_>>(),
+            explicit.iter().map(|s| &s.word).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn neighbor_opt_in_restores_default_arm() {
+        // The per-tab override vehicle: opting back in reproduces the
+        // frozen neighbor-ON output exactly (measured, never silent).
+        assert_eq!(
+            SuggestOpts::policy_for_tab("EN").with_neighbor(true).include_neighbor,
+            SuggestOpts::default().include_neighbor
+        );
+        let stack = DictionaryStack::new(base());
+        let now = crate::personal::now_quantized();
+        let words = |s: Vec<Suggestion>| {
+            s.into_iter().map(|x| (x.word, x.score.to_bits())).collect::<Vec<_>>()
+        };
+        // "43555" is a 1-edit neighbor of hello's 43556: ON finds it, the
+        // default-OFF policy does not, the opt-in does.
+        let on = words(stack.suggest_at("", "43555", "EN", 5, now));
+        assert!(on.iter().any(|(w, _)| *w == "hello"));
+        let policy = words(stack.suggest_policy_at("", "43555", "EN", 5, now));
+        assert!(!policy.iter().any(|(w, _)| *w == "hello"));
+        let opt_in = words(stack.suggest_with_opts_at(
+            "",
+            "43555",
+            "EN",
+            5,
+            now,
+            &SuggestOpts::policy_for_tab("EN").with_neighbor(true),
+        ));
+        assert_eq!(opt_in, on, "opt-in must reproduce the ON arm exactly");
     }
 
     #[test]
