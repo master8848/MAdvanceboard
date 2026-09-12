@@ -45,6 +45,17 @@ fn default_lang() -> String {
     "en".to_string()
 }
 
+/// Fixed bigram vocabulary size (plan/09#2 desk-spike outcome).
+///
+/// `bigram_term` smooths with add-one mass `1/(N+V)`, so a growing
+/// `V=entries.len()` makes every unseen-pair score drift more negative over
+/// months of use even when behavior is unchanged (measured day0→day6 drift
+/// −0.67 score pts under dynamic V, +0.00 under fixed-10k; Lidstone-α barely
+/// moves it, so do not tune α). Fixed `V = 10_000` freezes the unseen mass:
+/// cold-start backoff (`count_prev == 0` → exactly `0.0`) is unaffected, and
+/// long-term scores stop bleeding as the personal dict grows.
+pub const BIGRAM_FIXED_VOCAB: u64 = 10_000;
+
 /// Deterministic category -> dedupe-lang rule (only `en`/`ne` exist today).
 fn lang_of_category(category: &str) -> String {
     if category.eq_ignore_ascii_case("ne") {
@@ -240,7 +251,9 @@ impl PersonalDict {
         v
     }
 
-    /// `(count(prev,w), count(prev), V)`.
+    /// `(count(prev,w), count(prev), V)` with `V` fixed at
+    /// [`BIGRAM_FIXED_VOCAB`] (plan/09#2): the unseen mass never drifts as
+    /// the dict grows.
     pub fn bigram_counts(&self, prev: &str, word: &str) -> (u64, u64, u64) {
         let pw = self
             .bigrams
@@ -248,7 +261,7 @@ impl PersonalDict {
             .copied()
             .unwrap_or(0);
         let p = self.prev_counts.get(&prev.to_lowercase()).copied().unwrap_or(0);
-        (pw, p, self.entries.len().max(1) as u64)
+        (pw, p, BIGRAM_FIXED_VOCAB)
     }
 
     pub fn is_blocked(&self, word: &str) -> bool {
@@ -745,6 +758,34 @@ mod tests {
         assert!(e2.deleted);
         let line = serde_json::to_string(&e).unwrap();
         assert!(line.contains("\"del\":true"));
+    }
+
+    #[test]
+    fn bigram_vocab_fixed_at_10k_as_dict_grows() {
+        // Plan/09#2: V must not grow with the dict (dynamic V drifted the
+        // unseen-pair score −0.67 pts over 6 simulated days; fixed is 0.00).
+        use crate::rank::bigram_term;
+        let mut d = PersonalDict::new();
+        let (_, _, v0) = d.bigram_counts("the", "quick");
+        assert_eq!(v0, BIGRAM_FIXED_VOCAB);
+        for i in 0..50 {
+            d.learn(&format!("word{i:03}"), "EN");
+        }
+        let (cpw, cp, v1) = d.bigram_counts("the", "quick");
+        assert_eq!((cpw, cp), (0, 0));
+        assert_eq!(v1, BIGRAM_FIXED_VOCAB, "V must stay fixed as entries grow");
+        // Cold-start backoff still exactly 0 regardless of V.
+        assert_eq!(bigram_term(0, 0, v1), 0.0);
+        // And the smoothed unseen score is now growth-invariant: growing
+        // the dict further cannot move it.
+        d.record_bigram("the", "quick");
+        let s_before = bigram_term(0, 1, d.bigram_counts("the", "zorblax").2);
+        for i in 50..150 {
+            d.learn(&format!("word{i:03}"), "EN");
+        }
+        let s_after = bigram_term(0, 1, d.bigram_counts("the", "zorblax").2);
+        assert_eq!(s_before, s_after, "unseen score must not drift with growth");
+        assert!(s_after < 0.0);
     }
 
     #[test]
