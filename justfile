@@ -40,6 +40,16 @@ android-assemble:
     @if [ -z "${JAVA_HOME:-}" ]; then echo "(!) JAVA_HOME unset - run: mise install, then re-exec shell with mise activated"; fi
     cd android && ./gradlew assembleDebug
 
+# Cross-compile the Rust engine for Android (needs ANDROID_NDK_HOME + cargo-ndk).
+# Rebuilds android/ime/src/main/jniLibs/<abi>/libkbcore.so (release).
+# Re-run after ANY #[uniffi::export] change, then re-regen the Kotlin bindings
+# (uniffi-bindgen 0.32.1, see docs/BUILD.md) — .so checksums must match them.
+ndk-libs:
+    @echo "-> cargo ndk release libs (arm64-v8a + x86_64)"
+    @if [ -z "${ANDROID_NDK_HOME:-}" ]; then echo "(!) ANDROID_NDK_HOME unset - point it at NDK 28 (see docs/BUILD.md)"; exit 1; fi
+    cd core-rust && cargo ndk -t arm64-v8a -t x86_64 -o ../android/ime/src/main/jniLibs build --release
+    @ls -la android/ime/src/main/jniLibs/arm64-v8a/libkbcore.so android/ime/src/main/jniLibs/x86_64/libkbcore.so
+
 # Read-only snapshot; cross-module reconcile is owned by another agent.
 sync-report:
     @echo "-> sync-report (read-only snapshot, no edits)"
