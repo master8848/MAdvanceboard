@@ -153,9 +153,10 @@ class KbInputMethodService : InputMethodService() {
     private var symbolsTitle by mutableStateOf("")
     /**
      * Long-press placement popup (plan/08): null = hidden. The info text
-     * always carries the explicit engine-availability notes (live
-     * `placement()` / `set_cat_enabled` are not UniFFI-exported — see
-     * [StackEngineCaps]), so the popup never implies a live reorder.
+     * carries the pack record plus live engine lines (verified enable
+     * state via `isCatEnabled`, last-word provenance via `placement()`,
+     * resolved off the main thread after open) — failures name their
+     * cause inline, so the popup never implies an unverified state.
      */
     private var placementPopup by mutableStateOf<PlacementState?>(null)
     private var undoText: String = ""
@@ -365,9 +366,10 @@ class KbInputMethodService : InputMethodService() {
      * user custom packs ([CustomPackStore]) in stack order.
      *
      * Plan/08 ordering: stored priorities ([PackOrderStore]) override the
-     * compiled defaults and disabled packs are SKIPPED (the engine has no
-     * live `set_cat_enabled` FFI — see [StackEngineCaps] — so enable state
-     * applies at init). The whole list installs priority-desc, id-asc, so
+     * compiled defaults and disabled packs are SKIPPED (install-time seed
+     * of the enable state; the running engine then live-syncs toggles via
+     * `set_cat_enabled` — see [StackEngineCaps] — so a restart re-seeds
+     * identically). The whole list installs priority-desc, id-asc, so
      * on-device tie-breaks match the settings strip exactly. A missing
      * asset or an out-of-range custom priority throws loudly — the factory
      * turns it into a degraded engine WITH the cause (status line), never
@@ -554,10 +556,10 @@ class KbInputMethodService : InputMethodService() {
         val resolved = LayoutStore.layoutForCat(this, activeAssetId)
         if (resolved != activeLayoutId) setPadLayout(resolved)
         // Settings → dict-stack order (plan/08): new/enabled/disabled tabs
-        // appear without killing the IME; the engine itself picks up
-        // priority/enable changes on its next init (a restart applies them
-        // to ranking — live reorder is not UniFFI-exported, see
-        // [StackEngineCaps]).
+        // appear without killing the IME; enable flags live-sync into the
+        // running engine ([syncStackEnableToEngine] via [refreshTabs]),
+        // while priority (order) changes still need a restart (packs
+        // install in priority order — only enable/disable has a live FFI).
         refreshTabs()
     }
 
@@ -566,7 +568,9 @@ class KbInputMethodService : InputMethodService() {
      * (plan/08): numbers pinned first, base words/ne, enabled movable
      * packs in priority order, ★personal pinned last. A corrupt store
      * keeps the built-in strip and names the cause on the status line
-     * instead of breaking the keyboard.
+     * instead of breaking the keyboard. Persisted enable flags are then
+     * live-synced into the running engine ([syncStackEnableToEngine]) so
+     * Settings toggles apply without killing the IME.
      */
     private fun refreshTabs() {
         liveTabs = try {
@@ -575,6 +579,42 @@ class KbInputMethodService : InputMethodService() {
             android.util.Log.e("KbIME", "Stack order unreadable, using built-ins", e)
             gestureError = "Dictionary stack order unreadable: ${e.message}"
             DEFAULT_CATEGORIES
+        }
+        syncStackEnableToEngine()
+    }
+
+    /**
+     * Live-sync persisted enable flags into the running engine (plan/08):
+     * every movable slot whose stored flag disagrees with the engine's
+     * live `isCatEnabled` gets a `setCatEnabled` call, so a toggle made in
+     * Settings (a different process, no engine handle) or in the placement
+     * popup applies without killing the IME. Null engine (still loading)
+     * skips silently — init installs packs filtered by these same flags,
+     * so post-init state already matches. A degraded (stub) engine throws
+     * on the first read and the sync aborts with a log line: the stub owns
+     * no live state to sync, and prefs re-seed the next real init. Reads
+     * are O(1) `HashSet` probes; writes happen only on mismatch — never
+     * per-keystroke FFI chatter, only on strip refresh.
+     */
+    private fun syncStackEnableToEngine() {
+        val engine = predictor ?: return
+        serviceScope.launch {
+            try {
+                val slots = DictStackOrder.assembleSlots(this@KbInputMethodService)
+                var synced = 0
+                for (slot in slots) {
+                    if (slot.fixed) continue
+                    if (engine.isCatEnabled(slot.id) != slot.enabled) {
+                        engine.setCatEnabled(slot.id, slot.enabled)
+                        synced++
+                    }
+                }
+                if (synced > 0) {
+                    gestureLog.record("tabs", "stack-sync", "synced", "$synced categor(ies)")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("KbIME", "Stack enable sync failed: ${e.message}", e)
+            }
         }
     }
 
@@ -1667,12 +1707,12 @@ class KbInputMethodService : InputMethodService() {
      * category — pack record (id, priority, enabled, learn + layout
      * badges) with move up/down + enable/disable for movable packs.
      *
-     * The live engine `placement(word)` API (`core-rust/src/stack.rs`)
-     * answers per-WORD provenance (`packId • freq • accepts`) but is not
-     * UniFFI-exported ([StackEngineCaps.placementExported] == false), so
-     * the popup shows the pack record with [StackEngineCaps.placementError]
-     * attached — per-word provenance stays explicitly unavailable, never
-     * a plausible-looking fabrication.
+     * The popup opens synchronously with the prefs-backed pack record;
+     * live engine lines follow off the main thread ([resolvePlacementLive]):
+     * the verified enable state (`isCatEnabled`) plus per-word provenance
+     * for the last committed word (`placement(word)` →
+     * `packId • freq • accepts`). Failures name their cause inline — the
+     * popup never implies an unverified state.
      */
     internal fun onTabLongPress(tabLabel: String) {
         val id = canonicalTabId(tabLabel)
@@ -1697,6 +1737,67 @@ class KbInputMethodService : InputMethodService() {
         }
         placementPopup = placementFor(slot, slots, note = null)
         gestureLog.record("tabs", "long-press", "placement-open", id)
+        resolvePlacementLive(id, slot, slots)
+    }
+
+    /**
+     * Resolve the popup's live engine lines off the main thread: verified
+     * enable state for [id] plus `placement()` provenance for the last
+     * committed word (when there is one). Rebuilds the popup only if it
+     * still shows [id] — a toggle/move that landed meanwhile wins.
+     */
+    private fun resolvePlacementLive(id: String, slot: StackSlot, slots: List<StackSlot>) {
+        serviceScope.launch {
+            val liveNote = try {
+                val engine = predictor
+                if (engine == null) {
+                    "Engine loading — live state unavailable; enable state " +
+                        "applies when init finishes."
+                } else {
+                    val lines = mutableListOf<String>()
+                    val liveEnabled = engine.isCatEnabled(id)
+                    lines.add(
+                        if (liveEnabled == slot.enabled) {
+                            "Engine live: category \"$id\" " +
+                                (if (liveEnabled) "enabled" else "disabled") + " (verified)."
+                        } else {
+                            "Engine live: category \"$id\" reports " +
+                                (if (liveEnabled) "enabled" else "disabled") +
+                                " but prefs say " +
+                                (if (slot.enabled) "enabled" else "disabled") +
+                                " — restart re-syncs."
+                        }
+                    )
+                    val last = lastCommitWord
+                    if (last != null) {
+                        val info = engine.placement(last)
+                        lines.add(
+                            if (info.isNotEmpty()) "Last commit \"$last\": $info"
+                            else StackEngineCaps.placementUnknown(last)
+                        )
+                    }
+                    lines.joinToString("\n")
+                }
+            } catch (e: Exception) {
+                "Live engine lookup failed (${e.message}) — pack record " +
+                    "above is prefs state."
+            }
+            val current = placementPopup
+            if (current != null && current.tab == id) {
+                val fresh = try {
+                    DictStackOrder.assembleSlots(this@KbInputMethodService)
+                } catch (_: Exception) {
+                    null
+                }
+                val freshSlot = fresh?.find { it.id == id }
+                placementPopup = if (fresh != null && freshSlot != null) {
+                    placementFor(freshSlot, fresh, note = liveNote)
+                } else {
+                    placementFor(slot, slots, note = liveNote)
+                }
+            }
+            gestureLog.record("tabs", "long-press", "placement-live", id)
+        }
     }
 
     /** Rebuild the popup for [slot] (move/toggle targets re-resolve order). */
@@ -1713,8 +1814,6 @@ class KbInputMethodService : InputMethodService() {
         }
         val info = buildString {
             append(record)
-            append("\n")
-            append(StackEngineCaps.placementError())
             if (note != null) {
                 append("\n")
                 append(note)
@@ -1750,9 +1849,9 @@ class KbInputMethodService : InputMethodService() {
             } else {
                 placementFor(
                     slot, fresh,
-                    note = "Order saved — engine applies it on keyboard restart " +
-                        "(packs reinstall in priority order; live reorder is not " +
-                        "UniFFI-exported)."
+                    note = "Order saved — engine applies priorities on keyboard " +
+                        "restart (packs install in priority order; only " +
+                        "enable/disable is live)."
                 )
             }
             gestureLog.record("tabs", "placement", "move", "${current.tab}:$delta")
@@ -1761,12 +1860,21 @@ class KbInputMethodService : InputMethodService() {
         }
     }
 
-    /** Persist an enable/disable from the placement popup. */
+    /**
+     * Persist an enable/disable from the placement popup. Prefs save
+     * synchronously (the durable state + strip refresh); the live engine
+     * toggle (`setCatEnabled` + `isCatEnabled` read-back) follows off the
+     * main thread and the popup note carries the verified outcome — or the
+     * explicit failure, with the restart fallback named (prefs already
+     * saved, so a restart applies it regardless).
+     */
     internal fun onPlacementToggle() {
         val current = placementPopup ?: run {
             reportGestureError("Placement popup closed: toggle ignored")
             return
         }
+        val tabId: String
+        val next: Boolean
         try {
             val slots = DictStackOrder.assembleSlots(this)
             val slot = slots.find { it.id == current.tab }
@@ -1776,18 +1884,50 @@ class KbInputMethodService : InputMethodService() {
                     "Fixed pin \"${current.tab}\" cannot be disabled (base 0 / personal 100)."
                 )
             }
-            val next = !slot.enabled
+            next = !slot.enabled
+            tabId = current.tab
             if (slot.custom) CustomPackStore.setEnabled(this, slot.id, next)
             else PackOrderStore.setEnabled(this, slot.id, next)
             refreshTabs()
             val fresh = DictStackOrder.assembleSlots(this)
             val updated = fresh.find { it.id == current.tab } ?: slot.copy(enabled = next)
             placementPopup = placementFor(
-                updated, fresh, note = StackEngineCaps.liveToggleError(current.tab)
+                updated, fresh, note = "Preference saved — applying to the live engine…"
             )
-            gestureLog.record("tabs", "placement", "toggle", "${current.tab}:$next")
         } catch (e: Exception) {
             reportGestureError("Placement toggle failed: ${e.message}")
+            return
+        }
+        serviceScope.launch {
+            val note = try {
+                val engine = predictor
+                if (engine == null) {
+                    "Preference saved — engine still loading; enable state " +
+                        "applies when init finishes."
+                } else {
+                    engine.setCatEnabled(tabId, next)
+                    val live = engine.isCatEnabled(tabId)
+                    if (live == next) StackEngineCaps.liveToggleApplied(tabId, next)
+                    else StackEngineCaps.liveToggleFailure(tabId, "engine still reports enabled=$live")
+                }
+            } catch (e: Exception) {
+                StackEngineCaps.liveToggleFailure(tabId, e.message ?: e.javaClass.simpleName)
+            }
+            val cur = placementPopup
+            if (cur != null && cur.tab == tabId) {
+                val fresh = try {
+                    DictStackOrder.assembleSlots(this@KbInputMethodService)
+                } catch (_: Exception) {
+                    null
+                }
+                val freshSlot = fresh?.find { it.id == tabId }
+                placementPopup = if (fresh != null && freshSlot != null) {
+                    placementFor(freshSlot, fresh, note = note)
+                } else {
+                    cur.copy(info = cur.info + "\n" + note)
+                }
+            }
+            gestureLog.record("tabs", "placement", "toggle", "$tabId:$next")
         }
     }
 

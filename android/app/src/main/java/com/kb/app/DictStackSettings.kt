@@ -40,11 +40,13 @@ import kotlin.math.abs
  * learn badges.
  *
  * Reorder = reassign priorities ([DictStackOrder.respace]) + engine
- * `rebuild_index()` at the next init: there is no live reorder FFI (see
- * [StackEngineCaps]), so every save names the restart requirement
- * explicitly instead of pretending the running keyboard re-sorted.
- * Reorder two ways: long-press-drag the `≡` handle, or the Up/Down
- * buttons (the accessible path — identical operation).
+ * `rebuild_index()` at the next init: priorities are install-time (only
+ * enable/disable has a live FFI — see [StackEngineCaps]), so every order
+ * save names the restart requirement explicitly instead of pretending the
+ * running keyboard re-sorted. Toggles persist AND live-sync into the
+ * running engine (verified read-back in the IME tab popup). Reorder two
+ * ways: long-press-drag the `≡` handle, or the Up/Down buttons (the
+ * accessible path — identical operation).
  */
 @Composable
 fun DictStackSection() {
@@ -72,11 +74,14 @@ fun DictStackSection() {
 
     val capsNote = remember(tick) {
         try {
-            if (StackEngineCaps.setCatEnabledExported) {
-                "Engine note: live stack FFI present."
+            if (StackEngineCaps.setCatEnabledExported && StackEngineCaps.placementExported) {
+                "Engine note: live stack FFI present (set_cat_enabled / " +
+                    "is_cat_enabled / placement). Toggles apply to the " +
+                    "running keyboard live; order (priority) changes apply " +
+                    "on keyboard restart, when packs reinstall in the new order."
             } else {
-                "Engine note: live toggle/reorder FFI is not exported " +
-                    "(Predictor.set_cat_enabled missing from the UniFFI bindings) — " +
+                "Engine note: live toggle/placement FFI is not exported " +
+                    "(Predictor.set_cat_enabled/placement missing from the UniFFI bindings) — " +
                     "changes below apply on keyboard restart, when packs " +
                     "reinstall in the new order."
             }
@@ -101,11 +106,17 @@ fun DictStackSection() {
         try {
             if (slot.custom) CustomPackStore.setEnabled(context, slot.id, enabled)
             else PackOrderStore.setEnabled(context, slot.id, enabled)
+            // This process (Settings) holds no engine handle, so the live
+            // toggle itself runs in the IME: it live-syncs persisted flags
+            // on its next refresh and verifies with an isCatEnabled
+            // read-back (see the tab long-press popup). A restart applies
+            // the saved flag from prefs regardless.
             notice = if (slot.enabled == enabled) {
                 "No change."
             } else {
                 "Saved \"${slot.id}\" ${if (enabled) "enabled" else "disabled"}. " +
-                    StackEngineCaps.liveToggleError(slot.id)
+                    "The running keyboard picks it up live on its next refresh; " +
+                    "a restart applies it from prefs regardless."
             }
             error = null
             tick++

@@ -79,8 +79,13 @@ its word index instead of shipping a half-loaded category.
 - Wordlist parsing/validation: `pack::parse_user_wordlist`,
   `pack::build_user_pack`, `pack::check_user_priority`,
   `pack::validate_user_id` (`core-rust/src/pack.rs`).
-- Enable toggle: `DictionaryStack::set_cat_enabled` /
-  `is_cat_enabled` — disabled cats leave the suggest union entirely.
+- Enable toggle: `Predictor::set_cat_enabled` / `is_cat_enabled`
+  (UniFFI-exported; the IME tab popup and Settings toggle call them live,
+  verified with an `is_cat_enabled` read-back) — disabled cats leave the
+  suggest union entirely.
+- Word provenance: `Predictor::placement(word)` (UniFFI-exported;
+  `pack cat • freq • accepts`, `""` when no pack holds the word) — the
+  tab long-press popup shows it live for the last committed word.
 - Isolation: `SuggestOpts::policy_for_tab` hard-filters custom tabs
   (any non-empty tab outside the built-in set), so a custom tab shows
   its own words.

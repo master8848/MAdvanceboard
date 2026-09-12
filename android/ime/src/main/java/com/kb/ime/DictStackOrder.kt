@@ -15,13 +15,14 @@ import android.util.Log
  * (see [DictStackOrder.respace]) so the engine install order matches the UI
  * exactly (ties break identically on both sides).
  *
- * Engine wiring limits (explicit, never stubbed — see [StackEngineCaps]):
- * the Rust `DictionaryStack::set_cat_enabled` / `placement()` APIs exist in
- * `core-rust` but are NOT `#[uniffi::export]`ed, so the generated bindings
- * (`uniffi/kbcore/kbcore.kt`) expose neither. Toggles and reorders therefore
- * persist locally and apply at the next engine init (packs install filtered
- * + sorted by these values); the UI names the missing FFI on every such
- * action instead of pretending a live reorder happened.
+ * Engine wiring (live — see [StackEngineCaps]): the Rust
+ * `DictionaryStack::set_cat_enabled` / `is_cat_enabled` and
+ * `Predictor::placement()` APIs are `#[uniffi::export]`ed, so the generated
+ * bindings (`uniffi/kbcore/kbcore.kt`) expose `setCatEnabled` /
+ * `isCatEnabled` / `placement`. Toggles persist locally AND apply to the
+ * running engine immediately (verified with an `isCatEnabled` read-back);
+ * reorder persists locally and applies at the next engine init (packs
+ * install in priority order — only enable/disable has a live FFI).
  */
 
 /** One row of the user-visible stack (built-in, custom, or fixed pin). */
@@ -382,16 +383,15 @@ object PackOrderStore {
 
 /**
  * Engine capability probe for the stack-ordering surface. The Rust methods
- * exist (`core-rust/src/stack.rs:placement`,
- * `core-rust/src/predictor.rs:set_cat_enabled`) but live in a plain-Rust
- * `impl` block, NOT the `#[uniffi::export]` block — so the generated
- * bindings expose neither. This probe reads the generated class metadata
- * WITHOUT initializing it (`Class.forName(..., initialize=false)` — no
- * native library load, JVM-test safe) and reports exactly what the bridge
- * can call. Callers MUST surface the [liveToggleError]/[placementError]
- * strings user-visibly wherever a live engine action is unavailable;
- * adding a same-named shim anywhere in Kotlin instead is a stub and is
- * forbidden.
+ * (`core-rust/src/predictor.rs:set_cat_enabled` / `is_cat_enabled` /
+ * `placement`) are `#[uniffi::export]`ed, so the generated bindings
+ * (`uniffi/kbcore/kbcore.kt`) expose them — this probe reads the generated
+ * class metadata WITHOUT initializing it (`Class.forName(...,
+ * initialize=false)` — no native library load, JVM-test safe) and reports
+ * exactly what the bridge can call. Callers use the live FFI and surface
+ * the [liveToggleFailure]/[placementUnknown] strings user-visibly wherever
+ * a live engine action fails or finds nothing; adding a same-named shim
+ * anywhere in Kotlin instead is a stub and is forbidden.
  */
 object StackEngineCaps {
     const val UNI_FFI_CLASS = "uniffi.kbcore.Predictor"
@@ -415,23 +415,26 @@ object StackEngineCaps {
     val setCatEnabledExported: Boolean
         get() = "setCatEnabled" in methodNames()
 
+    /** True iff `Predictor.isCatEnabled` is exported via UniFFI. */
+    val isCatEnabledExported: Boolean
+        get() = "isCatEnabled" in methodNames()
+
     /** True iff `Predictor.placement` is exported via UniFFI. */
     val placementExported: Boolean
         get() = "placement" in methodNames()
 
-    /** Explicit error for a live enable/disable that cannot reach the engine. */
-    fun liveToggleError(cat: String): String =
-        "Live engine toggle unavailable for \"$cat\": Predictor.set_cat_enabled " +
-            "is not exported via UniFFI (core-rust/src/predictor.rs keeps it a " +
-            "plain-Rust method; generated bindings at " +
-            "android/core-bridge/src/main/java/uniffi/kbcore/kbcore.kt lack " +
-            "setCatEnabled). Preference saved — applies on keyboard restart " +
-            "when packs reinstall in the new order."
+    /** Note after a verified live toggle (`set` + `is` read-back agree). */
+    fun liveToggleApplied(cat: String, enabled: Boolean): String =
+        "Engine live: \"$cat\" ${if (enabled) "enabled" else "disabled"} " +
+            "applied + verified."
 
-    /** Explicit error for a word-provenance lookup that cannot reach the engine. */
-    fun placementError(): String =
-        "Engine word lookup unavailable: DictionaryStack::placement() " +
-            "(core-rust/src/stack.rs) is not exported on the UniFFI Predictor " +
-            "object — showing the pack record, not live word provenance " +
-            "(`packId • freq • accepts`)."
+    /** Explicit note when the live toggle cannot reach the engine. */
+    fun liveToggleFailure(cat: String, cause: String): String =
+        "Preference saved, but the live engine toggle failed for \"$cat\" " +
+            "($cause) — applies on keyboard restart when packs reinstall " +
+            "in the new order."
+
+    /** Explicit note when live `placement()` holds no record for [word]. */
+    fun placementUnknown(word: String): String =
+        "Engine live: no pack holds \"$word\"."
 }

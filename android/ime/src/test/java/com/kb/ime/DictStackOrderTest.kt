@@ -134,20 +134,31 @@ class DictStackOrderTest {
     }
 
     @Test
-    fun engineCapsPinMissingFfiExplicit() {
-        // The Rust methods exist but are NOT #[uniffi::export]ed, so the
-        // generated bindings expose neither. These assertions pin that
-        // reality: if a regen ever exports them, the tests fail loudly and
-        // the explicit-error paths must be rewired to live calls.
-        assertFalse(
-            "setCatEnabled must NOT be exported (explicit-error path is load-bearing)",
+    fun engineCapsExposeLiveFfi() {
+        // The Rust methods ARE #[uniffi::export]ed, so the generated
+        // bindings expose all three. These assertions pin the live
+        // reality: if a regen ever drops them, the tests fail loudly and
+        // the live-call paths must fall back to explicit-error notes.
+        assertTrue(
+            "setCatEnabled must be exported (popup toggle calls it live)",
             StackEngineCaps.setCatEnabledExported
         )
-        assertFalse(
-            "placement must NOT be exported (explicit-error path is load-bearing)",
+        assertTrue(
+            "isCatEnabled must be exported (toggle verification + popup state read it live)",
+            StackEngineCaps.isCatEnabledExported
+        )
+        assertTrue(
+            "placement must be exported (popup reads word provenance live)",
             StackEngineCaps.placementExported
         )
-        assertTrue(StackEngineCaps.liveToggleError("math").contains("not exported via UniFFI"))
-        assertTrue(StackEngineCaps.placementError().contains("not exported"))
+        assertTrue(
+            StackEngineCaps.liveToggleApplied("math", false).contains("verified")
+        )
+        assertTrue(
+            StackEngineCaps.liveToggleFailure("math", "boom").contains("boom")
+        )
+        assertTrue(
+            StackEngineCaps.placementUnknown("zxq").contains("no pack holds")
+        )
     }
 }
