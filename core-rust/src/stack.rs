@@ -1,12 +1,27 @@
 //! Trie/FST dictionary store + `DictionaryStack` (base < extensions < personal).
 //!
-//! Lookup unions candidates from the whole stack matching `seq`
-//! (exact + 1-edit adjacent-key neighbor + prefix), scores them with
+//! Lookup unions candidates from the tab-allowed slice of the stack matching
+//! `seq` (exact + 1-edit adjacent-key neighbor + prefix), scores them with
 //! the ranking formula, and returns the top-N.
+//!
+//! Per-tab isolation rule (hard, default on every suggest path): a candidate
+//! is visible under `active_tab` iff at least one contributing static row's
+//! `cat` canonicalizes to the tab (see [`tab_key`]), or — for personal-OOV
+//! rows — the entry was learned under that tab. Scoping happens BEFORE the
+//! merge, so display word/`cat` and summed frequencies derive from
+//! tab-allowed contributors only: no cross-tab display label can leak, and a
+//! word shared with a higher-priority pack is never lost from its home tab.
+//!
+//! General exception (the ONLY one): the `★personal` tab is the aggregate of
+//! the user's own words — static rows whose word is in the live personal
+//! dict (any learned category) plus every live personal-OOV entry. Static
+//! rows the user never touched never appear there. There is deliberately NO
+//! shared set beyond this: numbers stay under `numbers`, emoji under
+//! `emoji`, English under `words`/`EN` — nothing is visible everywhere.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -499,9 +514,31 @@ impl SuggestOpts {
         matches!(active_tab, "js" | "medical")
     }
 
+    /// Built-in tab ids (pack cats + display aliases + overlays). Any other
+    /// non-empty active tab is a user custom category (e.g. `names`).
+    pub const BUILTIN_TABS: &[&str] = &[
+        "words", "EN", "ne", "NE", "numbers", "js", "rust", "html", "emoji", "math", "medical",
+        "personal", "★personal",
+    ];
+
+    /// True for user custom categories: any non-empty tab outside
+    /// [`Self::BUILTIN_TABS`]. Empty maps to `EN` upstream (`Predictor`
+    /// defaults it), so it never counts as custom here.
+    pub fn is_custom_tab(active_tab: &str) -> bool {
+        !active_tab.is_empty() && !Self::BUILTIN_TABS.contains(&active_tab)
+    }
+
+    /// Tabs whose unions scope hard to the active tab: code identifiers
+    /// plus every user custom category (a custom tab shows its own words
+    /// — the names-category isolation rule).
+    pub fn is_isolated_tab(active_tab: &str) -> bool {
+        Self::is_code_tab(active_tab) || Self::is_custom_tab(active_tab)
+    }
+
     /// Production suggest policy per tab (Tier-0 NO-GO follow-up outcome):
     /// neighbor matching defaults OFF on every tab (+12.5pts scope top-3@4
-    /// on held-out, wins all four tabs) and code tabs additionally scope
+    /// on held-out, wins all four tabs) and isolated tabs (code tabs +
+    /// user custom categories) additionally scope
     /// the union to the active tab before the truncate. Frozen entry points
     /// (`suggest_at`, `SuggestOpts::default()`) are untouched — this is the
     /// vehicle the keyboard actually types through.
@@ -513,7 +550,7 @@ impl SuggestOpts {
     pub fn policy_for_tab(active_tab: &str) -> Self {
         Self {
             include_neighbor: false,
-            hard_tab_filter: Self::is_code_tab(active_tab),
+            hard_tab_filter: Self::is_isolated_tab(active_tab),
             ..Default::default()
         }
     }
@@ -622,6 +659,10 @@ pub struct DictionaryStack {
     /// this is only populated on genuine `fst` errors; surfaced via
     /// [`Self::fst_build_error`] instead of a silent missing index).
     fst_errors: HashMap<String, String>,
+    /// Disabled category tabs (user-pack enable toggle, plan/08):
+    /// disabled cats contribute no rows to the suggest union, so the tab
+    /// hides completely. Empty by default (every installed cat suggests).
+    disabled_cats: HashSet<String>,
 }
 
 impl DictionaryStack {
@@ -635,6 +676,7 @@ impl DictionaryStack {
             seq_postings: HashMap::new(),
             prefix_cache: RefCell::new(HashMap::new()),
             fst_errors: HashMap::new(),
+            disabled_cats: HashSet::new(),
         };
         s.ensure_precomputed_all();
         s.rebuild_index();
@@ -651,6 +693,7 @@ impl DictionaryStack {
             seq_postings: HashMap::new(),
             prefix_cache: RefCell::new(HashMap::new()),
             fst_errors: HashMap::new(),
+            disabled_cats: HashSet::new(),
         };
         s.ensure_precomputed_all();
         s.rebuild_index();
@@ -683,6 +726,25 @@ impl DictionaryStack {
         }
         self.extensions.extend(entries);
         self.rebuild_index();
+    }
+
+    /// Enable/disable a category tab at runtime (user-pack toggle,
+    /// plan/08): a disabled cat contributes no rows to the suggest union
+    /// (static rows and personal rows learned under it), so the tab hides
+    /// completely. Unknown cats are accepted (a pack may install later);
+    /// the toggle is explicit state, never derived silently. Re-enabling
+    /// restores the rows with no rebuild (the index keeps every row).
+    pub fn set_cat_enabled(&mut self, cat: &str, enabled: bool) {
+        if enabled {
+            self.disabled_cats.remove(cat);
+        } else {
+            self.disabled_cats.insert(cat.to_string());
+        }
+    }
+
+    /// True when `cat` contributes to suggest (installed and not disabled).
+    pub fn is_cat_enabled(&self, cat: &str) -> bool {
+        !self.disabled_cats.contains(cat)
     }
 
     /// Pack-declared layout affinity for `cat`: the `layout_id` of the
@@ -1516,6 +1578,13 @@ impl DictionaryStack {
                     );
                 }
             }
+        }
+        // Enable toggle (plan/08): disabled cats leave the union entirely
+        // (static + personal-under-that-cat), so the tab hides everywhere
+        // including the probe path that shares this union.
+        let disabled = &self.disabled_cats;
+        if !disabled.is_empty() {
+            merged.retain(|_, m| !disabled.contains(&m.cat));
         }
         merged
     }
@@ -2452,6 +2521,106 @@ mod tests {
         // emoji it gets the full category boost.
         let s = stack.suggest("", "386", "emoji", 5);
         assert_eq!(s[0].cat, "emoji");
+    }
+
+    fn names_stack() -> DictionaryStack {
+        // Custom names category colliding with EN on seq 262
+        // (bob/coa/cob): the isolation fixture for user packs.
+        let mut stack = DictionaryStack::new(
+            DictionaryStack::load_base_json(r#"[{"w":"bob","freq":900,"cat":"EN"}]"#).unwrap(),
+        );
+        let pack = load_pack_str(
+            r#"{"id":"names","title":"Names","version":"1.0.0",
+                "words":[{"w":"coa","freq":100,"cat":"names"}]}"#,
+        )
+        .unwrap();
+        assert!(pack.validate().is_empty());
+        stack.add_pack(&pack, 50);
+        stack
+    }
+
+    #[test]
+    fn custom_tabs_isolate_but_builtins_do_not() {
+        for tab in ["js", "medical", "names", "my_contacts"] {
+            assert!(SuggestOpts::is_custom_tab(tab) || SuggestOpts::is_code_tab(tab), "{tab}");
+            assert!(SuggestOpts::is_isolated_tab(tab), "{tab}");
+            assert!(
+                SuggestOpts::policy_for_tab(tab).hard_tab_filter,
+                "policy must hard-filter {tab:?}"
+            );
+        }
+        for tab in ["EN", "words", "NE", "ne", "numbers", "emoji", "personal", "★personal", ""] {
+            assert!(!SuggestOpts::is_custom_tab(tab), "{tab:?} is not custom");
+            assert!(
+                !SuggestOpts::policy_for_tab(tab).hard_tab_filter || SuggestOpts::is_code_tab(tab),
+                "policy must not hard-filter {tab:?}"
+            );
+        }
+        assert!(!SuggestOpts::policy_for_tab("words").hard_tab_filter);
+        assert!(!SuggestOpts::policy_for_tab("").hard_tab_filter);
+    }
+
+    #[test]
+    fn custom_pack_suggest_isolates_to_own_words() {
+        // EN "bob"(262, freq 900) outranks names "coa"(262, freq 100) in
+        // the unfiltered union; the names-tab policy must scope to names.
+        let stack = names_stack();
+        let now = crate::personal::now_quantized();
+        let unfiltered = stack.suggest_no_neighbor_at("", "262", "names", 5, now);
+        assert!(
+            unfiltered.iter().any(|s| s.cat == "EN"),
+            "fixture needs EN cross-tab noise, got {:?}",
+            unfiltered.iter().map(|s| &s.word).collect::<Vec<_>>()
+        );
+        let policy = stack.suggest_policy_at("", "262", "names", 5, now);
+        assert!(!policy.is_empty(), "names policy must keep the names row");
+        assert!(
+            policy.iter().all(|s| s.cat == "names"),
+            "isolated tab must show its own words, got {:?}",
+            policy.iter().map(|s| &s.word).collect::<Vec<_>>()
+        );
+        assert_eq!(policy[0].word, "coa");
+    }
+
+    #[test]
+    fn personal_learn_overlay_works_under_custom_tab() {
+        // OOV "cob" (262) learned under `names` suggests under the names
+        // tab with the personal overlay, like every built-in tab.
+        let mut stack = names_stack();
+        let now = crate::personal::now_quantized();
+        assert!(
+            stack
+                .suggest_policy_at("", "262", "names", 5, now)
+                .iter()
+                .all(|s| s.word != "cob")
+        );
+        stack.personal.learn("cob", "names");
+        stack.personal.learn("cob", "names");
+        let s = stack.suggest_policy_at("", "262", "names", 5, now);
+        assert!(
+            s.iter().any(|s| s.word == "cob"),
+            "learned OOV must suggest under its custom tab, got {:?}",
+            s.iter().map(|s| &s.word).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn disable_cat_hides_tab_and_reenable_restores() {
+        let mut stack = names_stack();
+        let now = crate::personal::now_quantized();
+        assert!(stack.is_cat_enabled("names"));
+        assert!(!stack.suggest_policy_at("", "262", "names", 5, now).is_empty());
+        stack.set_cat_enabled("names", false);
+        assert!(!stack.is_cat_enabled("names"));
+        assert!(
+            stack.suggest_policy_at("", "262", "names", 5, now).is_empty(),
+            "disabled tab must suggest nothing"
+        );
+        // Other tabs are unaffected by the toggle.
+        assert!(!stack.suggest_policy_at("", "262", "words", 5, now).is_empty());
+        stack.set_cat_enabled("names", true);
+        assert!(stack.is_cat_enabled("names"));
+        assert!(!stack.suggest_policy_at("", "262", "names", 5, now).is_empty());
     }
 
     fn ne_stack() -> DictionaryStack {
