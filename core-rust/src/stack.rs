@@ -16,6 +16,10 @@ use crate::pack::PackFile;
 use crate::personal::{now_quantized, PersonalDict};
 use crate::rank::{base_term, dequantize_base, quantize_base, score_candidate_with_base, RankInput, RankWeights};
 
+/// Prefix-result cache entry: `(layout_id, digits)` -> exact+prefix
+/// `(row, keyfit-tag)` sets (`1` = exact, `0` = prefix).
+type PrefixCache = HashMap<(String, String), Vec<(u32, u8)>>;
+
 /// Layout ids with precomputed sequences (all current built-ins).
 pub const PRECOMPUTED_LAYOUTS: &[&str] = &["t9-9", "t9-12", "t9-16"];
 
@@ -472,7 +476,7 @@ pub struct DictionaryStack {
     /// Cleared on every index rebuild; personal rows never enter it.
     /// `RefCell` because scoring is single-threaded (plan/04) and
     /// `suggest` takes `&self`.
-    prefix_cache: RefCell<HashMap<(String, String), Vec<(u32, u8)>>>,
+    prefix_cache: RefCell<PrefixCache>,
     /// FST build failures by layout (insert sets are sorted+deduped so
     /// this is only populated on genuine `fst` errors; surfaced via
     /// [`Self::fst_build_error`] instead of a silent missing index).
@@ -1329,10 +1333,10 @@ impl DictionaryStack {
         }
     }
 
-    /// Indexed match (plan/05 #1-2 + cache #6): exact posting-list lookup
-    /// + FST `StartsWith` prefix page + generative 1-edit neighbor
-    /// expansion (`len x neighbor_codes` exact lookups, ~50 for 7-digit
-    /// input). Rows merge straight into the union — no intermediate hit
+    /// Indexed match (plan/05 #1-2 + cache #6): exact posting-list lookup,
+    /// FST `StartsWith` prefix page, and generative 1-edit neighbor
+    /// expansion through `neighbor_codes` (~50 lookups for 7-digit input).
+    /// Rows merge straight into the union — no intermediate hit
     /// map, no second sort: [`Self::merge_row`] is insertion-order
     /// independent, so FST-stream order needs no reordering.
     /// `neighbor_on == false` skips generation (the gate's precision arm).
