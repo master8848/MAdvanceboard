@@ -9,7 +9,7 @@ rust = "stable"
 # AGP/Gradle toolchain requires JDK 17.
 java = "17"
 # Matches android/gradle/wrapper/gradle-wrapper.properties; ./gradlew is the fallback.
-gradle = "9.6.0"
+gradle = "9.7.1"
 just = "latest"
 # scripts/build_pack.py + JSON validation of packs/*.json.
 python = "3.12"
