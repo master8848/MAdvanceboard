@@ -104,3 +104,31 @@ rarely decided top-3).
 - KSPW arm still runs neighbor-ON (0.852); re-run with the OFF policy for the
   blessed number.
 - 09#3 proxy caveat above.
+
+## Ranker improvements applied (train-tuned, held-out reported)
+
+Commits `f0795fe`, `8fd4147`, `bd4afa3`, `0a77a7f`, `913c9bd`, `1fd150b`
+(core-rust only; gate thresholds frozen). Full suite green except the frozen
+gate itself (still NO-GO on accuracy, as expected).
+
+| change | held-out scope ON | held-out scope OFF/policy | KSPW | lift |
+|---|---|---|---|---|
+| baseline (NO-GO report) | 0.34 | 0.469 | 0.852 PASS | 100.0pts PASS |
+| + fixed V=10k | 0.34 | 0.47 | 0.852 PASS | 100.0pts PASS |
+| + per-tab OFF policy, code-tab filter, w_cat 0.3→1.5 | **0.37** | **0.4845** | **0.845 PASS** | 100.0pts PASS |
+
+Per-tab OFF after: words 0.88→0.97, js 0.65→0.99, medical 0.67→1.00, NE
+0.40 flat (within-tab ranking, not cross-tab noise). Per-tab ON after:
+words 0.93, NE 0.27, js 0.95, medical 0.98.
+
+- 09#1 coordinate sweep (train split only, transfer confirmed held-out):
+  most elastic weight was `w_keyfit` but HARMFUL (−0.025 train/−0.019 held
+  at 2.0 — do not raise); `w_base`/`w_reject`/`hide_threshold` ~zero
+  elasticity (fixed, do not tune); only `w_cat` earned a change (monotone
+  0.0/0.6/1.0/1.5 curve both splits, knee 1.5, plateau 1.5–3.0 flat).
+- Overfit safeguards: train-only tuning; no per-word overrides added;
+  structural-first (policy + filter + fixed-V); new `ranker_guard` test
+  fails below the 0.469 OFF floor (negative-controlled: ON arm 0.373 fails).
+- Remaining gap to 85%: 85 − 37 = **48pts** (ON) / 85 − 48.5 = **36.5pts**
+  (policy). NE (0.40) is now the binding constraint — needs the learning
+  arm / real-data retuning, not more cheap levers.
