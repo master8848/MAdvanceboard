@@ -3,7 +3,7 @@
 
     <application
         android:label="9-Key Keyboard"
-        android:theme="@android:style/Theme.Material.Light">
+        android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
         <activity
             android:name=".SettingsActivity"
             android:exported="true">

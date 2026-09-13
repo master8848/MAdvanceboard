@@ -46,8 +46,9 @@ dependencies {
     implementation(project(":plugin-api"))
     implementation(project(":sync"))
     implementation(libs.androidx.core.ktx)
-    // NOTE: appcompat removed — both activities are ComponentActivity, no
-    // AppCompat usage. Keeps the APK lean.
+    // AppCompat for DayNight dark mode (Settings/Onboarding are
+    // AppCompatActivity; AppCompatDelegate applies the ThemeStore mode).
+    implementation(libs.androidx.appcompat)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime)
     implementation(libs.coroutines.core)

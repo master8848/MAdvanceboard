@@ -760,20 +760,27 @@ mod tests {
                 {"w":"fun","freq":150,"cat":"NE"}]"#
                 .to_string(),
         );
-        // Compiled defaults: global t9-9, NE override t9-16.
+        // Compiled defaults: global t9-9, NE follows it (plan/02 + MASTER
+        // rule 3; the tr-model matches Roman input under t9-9, so t9-16
+        // is opt-in only).
         assert_eq!(p.default_layout(), "t9-9");
         assert_eq!(p.cat_layout("EN".to_string()), "t9-9");
-        assert_eq!(p.cat_layout("NE".to_string()), "t9-16");
+        assert_eq!(p.cat_layout("NE".to_string()), "t9-9");
         assert_eq!(p.layout_diagnostic("EN".to_string()), "");
-        // Per-cat suggest resolves the layout by itself.
-        let s = p.suggest_for_cat("".to_string(), "396".to_string(), "NE".to_string(), 5);
+        // Per-cat suggest resolves the layout by itself (t9-9 digits).
+        let s = p.suggest_for_cat("".to_string(), "386".to_string(), "NE".to_string(), 5);
         assert!(s.iter().any(|c| c.word == "fun"));
-        assert_eq!(s.iter().find(|c| c.word == "fun").unwrap().layout_id, "t9-16");
+        assert_eq!(s.iter().find(|c| c.word == "fun").unwrap().layout_id, "t9-9");
         let s9 = p.suggest_for_cat("".to_string(), "386".to_string(), "EN".to_string(), 5);
         assert_eq!(s9.iter().find(|c| c.word == "fun").unwrap().layout_id, "t9-9");
-        // Switching the global changes labels + results deterministically.
-        p.set_default_layout("t9-16".to_string());
+        // Opting NE into t9-16 changes its digits deterministically
+        // (fun: 386 -> 396); EN stays on the global.
+        p.set_cat_layout("NE".to_string(), "t9-16".to_string());
         assert_eq!(p.encode("fun".to_string(), "t9-16".to_string()), "396");
+        let s = p.suggest_for_cat("".to_string(), "396".to_string(), "NE".to_string(), 5);
+        assert!(s.iter().any(|c| c.word == "fun"));
+        // Switching the global moves tabs without overrides.
+        p.set_default_layout("t9-16".to_string());
         let s = p.suggest_for_cat("".to_string(), "396".to_string(), "EN".to_string(), 5);
         assert!(s.iter().any(|c| c.word == "fun"));
         // Per-cat override wins over the global.
@@ -782,6 +789,9 @@ mod tests {
         assert!(s.iter().any(|c| c.word == "fun"));
         p.clear_cat_layout("EN".to_string());
         assert_eq!(p.cat_layout("EN".to_string()), "t9-16");
+        // Clearing the NE opt-in returns it to the global.
+        p.clear_cat_layout("NE".to_string());
+        assert_eq!(p.cat_layout("NE".to_string()), "t9-16");
     }
 
     #[test]
@@ -863,7 +873,7 @@ mod tests {
         );
         assert_eq!(p.cat_layout("NE".to_string()), "t9-16");
         // Pack affinity seeds cat defaults where no override exists
-        // ("math" has no compiled default, unlike NE).
+        // ("math" has no compiled default).
         let seeds = p
             .try_add_pack_json(
                 r#"{"id":"math","title":"Math","version":"1.0.0","layout":"t9-12",

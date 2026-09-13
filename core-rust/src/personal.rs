@@ -133,13 +133,24 @@ impl PersonalDict {
     }
 
     /// Learn (or re-accept) a word. Returns `false` when bypassed by
-    /// password mode or empty input.
+    /// password mode or empty input. The accept timestamp is floored to
+    /// its 1h bucket ([`now_quantized`]) so `recency = exp(-dt/7d)` is
+    /// stable within the hour: two accepts in the same hour land on the
+    /// same `last_seen`, and repeats stay byte-identical (plan/04).
     pub fn learn(&mut self, word: &str, category: &str) -> bool {
+        self.learn_at(word, category, now_ts())
+    }
+
+    /// Deterministic learn at an explicit wall-clock `now`: the stored
+    /// `last_seen` is `quantize_ts(now)`. Tests and replay harnesses pass
+    /// a frozen hour bucket; negative timestamps fail loudly via
+    /// [`quantize_ts`].
+    pub fn learn_at(&mut self, word: &str, category: &str, now: i64) -> bool {
         if self.password_mode || word.trim().is_empty() {
             return false;
         }
+        let ts = quantize_ts(now).unwrap_or_else(|e| panic!("PersonalDict::learn_at: {e}"));
         let k = key_of(word);
-        let ts = now_ts();
         match self.entries.get_mut(&k) {
             Some(e) => {
                 e.count += 1;
@@ -173,10 +184,17 @@ impl PersonalDict {
     }
 
     /// Block a word: tombstone `{del:true}`; hidden everywhere,
-    /// survives sync, exempt from LFU eviction.
+    /// survives sync, exempt from LFU eviction. Timestamp quantized to
+    /// the 1h bucket (see [`Self::learn`]).
     pub fn forget(&mut self, word: &str) -> bool {
+        self.forget_at(word, now_ts())
+    }
+
+    /// Deterministic block at an explicit wall-clock `now` (see
+    /// [`Self::learn_at`]).
+    pub fn forget_at(&mut self, word: &str, now: i64) -> bool {
+        let ts = quantize_ts(now).unwrap_or_else(|e| panic!("PersonalDict::forget_at: {e}"));
         let k = key_of(word);
-        let ts = now_ts();
         match self.entries.get_mut(&k) {
             Some(e) => {
                 e.deleted = true;
@@ -203,12 +221,21 @@ impl PersonalDict {
     }
 
     /// Record a rejection (user deleted the committed word or picked
-    /// another candidate).
+    /// another candidate). New-row timestamps use the 1h bucket (see
+    /// [`Self::learn`]); existing rows keep their `last_seen` (a reject
+    /// is not an accept).
     pub fn record_reject(&mut self, word: &str) {
+        self.record_reject_at(word, now_ts())
+    }
+
+    /// Deterministic reject at an explicit wall-clock `now` (see
+    /// [`Self::learn_at`]).
+    pub fn record_reject_at(&mut self, word: &str, now: i64) {
         let k = key_of(word);
         if let Some(e) = self.entries.get_mut(&k) {
             e.rej += 1;
         } else {
+            let ts = quantize_ts(now).unwrap_or_else(|e| panic!("PersonalDict::record_reject_at: {e}"));
             self.entries.insert(
                 k.clone(),
                 PersonalEntry {
@@ -218,7 +245,7 @@ impl PersonalDict {
                     count: 0,
                     acc: 0,
                     rej: 1,
-                    last_seen: now_ts(),
+                    last_seen: ts,
                     deleted: false,
                 },
             );
@@ -634,6 +661,39 @@ mod tests {
         assert_eq!(quantize_ts(0), Ok(0));
         // Negative timestamps are an explicit error, never silent wrap.
         assert!(quantize_ts(-1).is_err());
+    }
+
+    #[test]
+    fn learn_timestamps_floor_to_hour_bucket() {
+        // plan/04: `last_seen` is bucketed, so two accepts 40 min apart
+        // in the same hour land on the same stamp and score identically.
+        let mut a = PersonalDict::new();
+        let mut b = PersonalDict::new();
+        assert!(a.learn_at("hello", "EN", 3600));
+        assert!(b.learn_at("hello", "EN", 3600 + 2400));
+        assert_eq!(
+            a.get("hello").unwrap().last_seen,
+            b.get("hello").unwrap().last_seen,
+            "same-hour accepts must share a last_seen bucket"
+        );
+        assert_eq!(a.get("hello").unwrap().last_seen, 3600);
+        // Next hour is a distinct bucket (decay across days preserved).
+        let mut c = PersonalDict::new();
+        assert!(c.learn_at("hello", "EN", 7200));
+        assert_eq!(c.get("hello").unwrap().last_seen, 7200);
+        // Recency is stable within the hour for a fixed quantized now.
+        let now = quantize_ts(3600 + 3000).unwrap();
+        assert_eq!(
+            crate::rank::recency_term(now, a.get("hello").unwrap().last_seen),
+            crate::rank::recency_term(now, b.get("hello").unwrap().last_seen),
+        );
+        // Reject/forget paths bucket identically.
+        let mut d = PersonalDict::new();
+        d.record_reject_at("nope", 3600 + 100);
+        assert_eq!(d.get("nope").unwrap().last_seen, 3600);
+        let mut e = PersonalDict::new();
+        e.forget_at("spam", 3600 + 3599);
+        assert_eq!(e.get("spam").unwrap().last_seen, 3600);
     }
 
     #[test]
