@@ -21,6 +21,10 @@ Decision: taps = typing only. All gestures = non-writing functions: switch categ
 - CategoryTabs: tap / h-scroll = switch category (sets dict filter + layout resolve). Swipe stays in strip.
 - QWERTY FAB tap = toggle `Pad↔QWERTY`. No single-finger Pad gesture for this. Optional advanced: 2-finger swipe `↑`.
 
+## Amendment 2026-09-13 — QWERTY flings must share the space path (see 22)
+
+Pad `↑` (space+commit) and `→` (accept #1) must call the SAME `onQwertySpace/onDelete` used by physical Space/⌫ (with `lastAuto` correction-restore logic), not a separate `commitCandidate(top)`. Two space paths with different confidence handling invite accidental autocorrect on QWERTY. Physical Space/⌫ stay authoritative; flings are duplicates. Tap-commits for emoji/code must not clear `lastAuto` needed for backspace-restore.
+
 Rejected: Pad `←→` for category switch (conflicts delete/accept); `↓` for symbols.
 
 ## 12-key override

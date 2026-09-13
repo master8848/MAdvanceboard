@@ -1804,14 +1804,21 @@ class KbInputMethodService : InputMethodService() {
     }
 
     /**
-     * Fling `→`: accept top suggestion (= tap candidate #1). Explicit noop
-     * with a log entry when there is nothing to accept (numbers category or
-     * empty strip) — never a silent swallow.
+     * Fling `→`: accept top suggestion (= tap candidate #1) on T9.
+     * On QWERTY composing this is [onQwertySpace] (plan/01 amendment: the
+     * same confidence-gated path as physical Space — a separate
+     * `commitCandidate(top)` would always take the correction, bypassing
+     * confidence). Explicit noop with a log entry when there is nothing
+     * to accept (numbers category or empty strip) — never a silent swallow.
      */
     internal fun onPadFlingAccept() {
         val policy = gesturePolicy()
         if (!policy.flingRightEnabled) {
             gestureLog.record("pad", "fling-right", "noop-no-prediction", activeAssetId)
+            return
+        }
+        if (qwertyFallback || qwertyBuffer.isNotEmpty()) {
+            onQwertySpace("fling-right")
             return
         }
         acceptTopCandidate("pad-fling")
@@ -2175,7 +2182,10 @@ class KbInputMethodService : InputMethodService() {
             onDelete = { deleteLast() }
             onEnter = { onQwertyEnter() }
             onSwitchIme = { switchToNextIme() }
-            onFlingAccept = { acceptTopCandidate("qwerty-fling") }
+            // Plan/01 amendment: the only QWERTY gesture (→) rides the
+            // authoritative space path (confidence + lastAuto), never a
+            // separate commit-top.
+            onFlingAccept = { onQwertySpace("fling-right") }
             onGestureRejected = { reason -> gestureLog.record("qwerty", "fling", "rejected", reason) }
             gesturesEnabled = flingsAllowedAT
             updateThresholds(effectiveThresholds())
