@@ -2,10 +2,10 @@
 //!
 //! Path fidelity with `KbInputMethodService.refreshQwertySuggestions`:
 //! raw Latin -> `Predictor::encode(raw, layoutId)` -> `suggest_with_layout`
-//! with the tab's resolved layout (`ne` -> `t9-16` compiled default) and
-//! the canonical asset id (`ne`) as the active tab. Base wordlist merges
-//! `packs/words_en.json` + `packs/nepali.json` exactly like
-//! `loadBaseWordlist` (single array into `Predictor::new`).
+//! with the tab's resolved layout (`ne` -> `t9-9` global default, MASTER
+//! rule 3 + plan/02) and the canonical asset id (`ne`) as the active
+//! tab. Base wordlist merges `packs/words_en.json` + `packs/nepali.json`
+//! exactly like `loadBaseWordlist` (single array into `Predictor::new`).
 
 use kbcore::pack::load_pack_str;
 use kbcore::Predictor;
@@ -62,7 +62,7 @@ fn qwerty_suggest(
 fn roman_meri_suggests_meri_class() {
     let p = ime_predictor();
     let (layout, digits, got) = qwerty_suggest(&p, "meri", "ne");
-    assert_eq!(layout, "t9-16", "ne tab must resolve to its compiled default");
+    assert_eq!(layout, "t9-9", "ne tab must resolve to the global default");
     assert!(!digits.is_empty(), "latin 'meri' must encode under {layout}");
     assert!(
         got.iter().any(|w| w == "मेरी"),
@@ -99,5 +99,21 @@ fn tr_first_pipeline_resolves_romanized_input_when_rows_exist() {
     assert!(
         got_mailea.iter().any(|w| w == "मैले"),
         "control: synthetic मैले/maile+alt row must suggest for 'mailea', got {got_mailea:?}"
+    );
+}
+
+/// t9-16 stays opt-in: a per-cat override re-encodes the same Roman input
+/// under the finer splits and still surfaces Devanagari (both layouts
+/// share the tr pipeline; only the digit strings differ).
+#[test]
+fn roman_typing_surfaces_devanagari_under_t9_16_opt_in() {
+    let p = ime_predictor();
+    p.set_cat_layout("ne".to_string(), "t9-16".to_string());
+    let (layout, digits, got) = qwerty_suggest(&p, "meri", "ne");
+    assert_eq!(layout, "t9-16");
+    assert!(!digits.is_empty(), "latin 'meri' must encode under t9-16");
+    assert!(
+        got.iter().any(|w| w == "मेरी"),
+        "opt-in t9-16 typing 'meri' (digits={digits}) must suggest मेरी, got {got:?}"
     );
 }

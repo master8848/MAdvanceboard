@@ -20,3 +20,7 @@ Breakage today: all vowels + matras `ा ि ी ु ू े ै ो ौ ं ः
 ## Acceptance
 
 - 253-word toy → 5k+ `w+tr` pack. `k→2`-style Roman typing surfaces `काठमाडौं`-class words. No matra-only `seq` (e.g. bare `9`s) in index. Per-tab top-3@4 reported for NE separately in `00-gates.md`.
+
+## Amendment 2026-09-13 — freq reality + scale (see 23)
+
+Pipeline landed (8005 rows, v2.0.1) but Leipzig intersect failed (Anubis wall) — tail uses wiki-token floor-200 substitute, so ~7700 rows can't break ties. Mark tail freqs low-confidence (uniform + curated-head boost) until a real source lands; don't tune weights against them. Scale warning: 8000-word NE gate scores 0.26 ON / 0.39 OFF (toy was 0.94) — crowding, not encoding, is now the blocker. Do not scale `alt` variants without the `09` #3 cap-vs-collision curve.
