@@ -5,8 +5,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
@@ -154,9 +152,12 @@ fun DictStackSection() {
         }
     }
 
-    LazyColumn(modifier = Modifier.fillMaxWidth()) {
-        items(orderIds.toList(), key = { it }) { id ->
-            val slot = byId[id] ?: return@items
+    // Plain Column (never a nested LazyColumn): this section lives inside the
+    // scrollable settings page, and a LazyColumn in a verticalScroll parent
+    // measures unbounded — the stack list rendered empty/broken.
+    Column(modifier = Modifier.fillMaxWidth()) {
+        for (id in orderIds.toList()) {
+            val slot = byId[id] ?: continue
             StackOrderRow(
                 slot = slot,
                 rowHeightPx = { rowHeights[id] ?: 0 },
