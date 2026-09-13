@@ -213,8 +213,7 @@ impl SessionLogger {
     /// Load the newest ring window from the `session_events` table
     /// (at most [`SESSION_RING_CAP`] events, oldest first). SQLite is never
     /// on the suggest path — this runs once at startup.
-    pub fn load_from_sqlite(path: &Path) -> Result<Self, String> {
-        let conn = Self::open_db(path)?;
+    pub fn load_from_sqlite(path: &Path) -> Result<Self, String> {        let conn = Self::open_db(path)?;
         let mut st = conn
             .prepare(
                 "SELECT ts, seq, ctx, chosen, shown_json, action
@@ -258,6 +257,98 @@ impl SessionLogger {
         }
         log.pending.clear();
         Ok(log)
+    }
+
+    // ---- Analytics queries (plan/14): each served by one secondary index.
+    //
+    // Hot path never calls these (suggest is pure RAM); they back 14d
+    // routine mining, the replay harness, and KSR measurement. Every query
+    // below must show `USING INDEX` in `EXPLAIN QUERY PLAN`
+    // (locked by `analytics_queries_use_indexes`).
+
+    /// Decode one event row (shared by the analytics readers below).
+    fn row_to_event(
+        ts: i64,
+        seq: String,
+        ctx: String,
+        chosen: String,
+        shown_json: String,
+        action: String,
+    ) -> Result<SessionEvent, String> {
+        let shown: Vec<String> =
+            serde_json::from_str(&shown_json).map_err(|e| format!("session: decode shown_json: {e}"))?;
+        Ok(SessionEvent { ts, seq, ctx, chosen, shown, action })
+    }
+
+    /// 14d routine mining (plan/13 P2) + KSR (plan/09#7): newest `limit`
+    /// events newer than `since_ts`. Served by `idx_events_ts`.
+    pub fn events_since(
+        conn: &rusqlite::Connection,
+        since_ts: i64,
+        limit: i64,
+    ) -> Result<Vec<SessionEvent>, String> {
+        let mut st = conn
+            .prepare(
+                "SELECT ts, seq, ctx, chosen, shown_json, action
+                 FROM session_events WHERE ts > ?1 ORDER BY ts DESC LIMIT ?2",
+            )
+            .map_err(|e| format!("session: events_since prepare: {e}"))?;
+        let rows = st
+            .query_map(rusqlite::params![since_ts, limit], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|e| format!("session: events_since query: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (ts, seq, ctx, chosen, shown_json, action) =
+                row.map_err(|e| format!("session: events_since row: {e}"))?;
+            out.push(Self::row_to_event(ts, seq, ctx, chosen, shown_json, action)?);
+        }
+        Ok(out)
+    }
+
+    /// Replay harness (plan/09#1) + lift A/B: newest `limit` events for
+    /// one `(chosen, action)` pair. Served by
+    /// `idx_events_chosen_action`.
+    pub fn events_by_chosen_action(
+        conn: &rusqlite::Connection,
+        chosen: &str,
+        action: &str,
+        limit: i64,
+    ) -> Result<Vec<SessionEvent>, String> {
+        let mut st = conn
+            .prepare(
+                "SELECT ts, seq, ctx, chosen, shown_json, action
+                 FROM session_events
+                 WHERE chosen = ?1 AND action = ?2 ORDER BY id DESC LIMIT ?3",
+            )
+            .map_err(|e| format!("session: events_by_chosen_action prepare: {e}"))?;
+        let rows = st
+            .query_map(rusqlite::params![chosen, action, limit], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|e| format!("session: events_by_chosen_action query: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (ts, seq, ctx, chosen, shown_json, action) =
+                row.map_err(|e| format!("session: events_by_chosen_action row: {e}"))?;
+            out.push(Self::row_to_event(ts, seq, ctx, chosen, shown_json, action)?);
+        }
+        Ok(out)
     }
 }
 
@@ -324,8 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn append_only_save_then_prune() {
-        // Two saves must accumulate (append-only, no DELETE+rewrite), and a
+    fn append_only_save_then_prune() {        // Two saves must accumulate (append-only, no DELETE+rewrite), and a
         // flush past the keep window must prune the oldest rows.
         let path = std::env::temp_dir().join("kbcore_session_append.sqlite");
         let _ = std::fs::remove_file(&path);
@@ -344,5 +434,82 @@ mod tests {
         let reloaded = SessionLogger::load_from_sqlite(&path).unwrap();
         assert_eq!(reloaded.len(), 2, "reload-save must not duplicate rows");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Plan/14 acceptance, part 3: session analytics queries are
+    /// index-served. Volume is realistic (3k rows + ANALYZE) so the
+    /// planner's choice is meaningful.
+    #[test]
+    fn analytics_queries_use_indexes() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::personal::PersonalDict::SQLITE_SCHEMA)
+            .unwrap();
+        {
+            let tx = conn.transaction().unwrap();
+            {
+                let mut ins = tx
+                    .prepare(
+                        "INSERT INTO session_events
+                         (ts, seq, ctx, chosen, shown_json, action)
+                         VALUES (?1, ?2, ?3, ?4, '[]', ?5)",
+                    )
+                    .unwrap();
+                for i in 0..3000 {
+                    ins.execute(rusqlite::params![
+                        1_700_000_000i64 + i as i64,
+                        "43556",
+                        "",
+                        format!("w{:03}", i % 100),
+                        if i % 2 == 0 { "accepted" } else { "rejected" },
+                    ])
+                    .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+        conn.execute_batch("ANALYZE").unwrap();
+
+        let plan_of = |sql: &str| -> Vec<String> {
+            conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        let p = plan_of(
+            "SELECT ts, seq, ctx, chosen, shown_json, action
+             FROM session_events WHERE ts > 1700002000 ORDER BY ts DESC LIMIT 50",
+        );
+        assert!(
+            p.iter()
+                .any(|d| d.contains("USING INDEX") && d.contains("idx_events_ts")),
+            "14d routine window must use idx_events_ts: {p:?}",
+        );
+        let p = plan_of(
+            "SELECT ts, seq, ctx, chosen, shown_json, action
+             FROM session_events
+             WHERE chosen = 'w000' AND action = 'accepted' ORDER BY id DESC LIMIT 50",
+        );
+        assert!(
+            p.iter().any(|d| d.contains("USING INDEX")
+                && d.contains("idx_events_chosen_action")),
+            "replay lookup must use idx_events_chosen_action: {p:?}",
+        );
+
+        // Functional locks on the helpers behind those plans.
+        let recent = SessionLogger::events_since(&conn, 1_700_002_950, 100).unwrap();
+        assert_eq!(recent.len(), 49);
+        assert!(recent.windows(2).all(|w| w[0].ts >= w[1].ts), "ts desc");
+        assert!(SessionLogger::events_since(&conn, 1_800_000_000, 10).unwrap().is_empty());
+        // Fixture parity: i % 100 == 0 => i even => action 'accepted', so
+        // ("w000", "accepted") hits and ("w000", "rejected") is empty.
+        let replay =
+            SessionLogger::events_by_chosen_action(&conn, "w000", "accepted", 100).unwrap();
+        assert_eq!(replay.len(), 30);
+        assert!(replay.iter().all(|e| e.chosen == "w000" && e.action == "accepted"));
+        assert!(SessionLogger::events_by_chosen_action(&conn, "w000", "rejected", 10)
+            .unwrap()
+            .is_empty());
     }
 }
