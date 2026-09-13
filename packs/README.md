@@ -1,6 +1,7 @@
 # Showcase packs (`packs/`)
 
-Wordlist sources for the 8 MVP showcase packs (SPEC section 3, milestone M3).
+Wordlist sources for the 9 showcase packs (SPEC section 3, milestone M3:
+8 MVP + `medical` domain pack).
 Format per file: `{id, title, version, words[]}` where each word is
 `{w, freq?, cat?, lang?, seq?}`. Load with `pack::load_pack(path)` in
 `core-rust`, then `stack.add_pack(&pack, priority)`. `seq` is an explicit
@@ -41,14 +42,14 @@ pack (`--f0/--alpha/--fmin`); existing freqs untouched. Canonical IDs gain
 | `words_en.json` | `words` | 5150 | 120..1000000 | EN core + common/tech + web2 tail |
 | `nepali.json` | `ne` | 8005 (v2.0.1) | 200..9000 | pipeline `w+tr` (HF 2.4M + wiki freq + 253 curated head) + 5 first-person pronouns (`म/मलाई/मैले/मेरो/मेरी`, v2.0.1 data fix); see Nepali rebuild below |
 | `numbers.json` | `numbers` | 10 | 50000 | unchanged (builtin digit-commit) |
-| `code_js.json` | `js` | 396 | 500..9500 | core keywords + TS + DOM/Node/std methods (v1.2.0) |
+| `code_js.json` | `js` | 399 | 500..9500 | core keywords + TS + DOM/Node/std methods (v1.2.0) |
 | `code_rust.json` | `rust` | 288 | 500..9500 | keywords + std traits/methods/macros/attrs; 26 `*2`/`*m` placeholders dropped (v1.2.0) |
 | `code_html.json` | `html` | 236 | 500..9500 | tags + attrs + events; 11 `*2` fakes dropped (v1.2.0) |
 | `emoji.json` | `emoji` | 211 | 800..9000 | +100 keyword→emoji; `🧸 bear2→teddy` key fix; `seq` materialized from `key` (v1.2.0) |
 | `math.json` | `math` | 180 | 800..6000 | full command set (Greek, ops, arrows, funcs, accents, fonts); `\sqrt2`/`\cbrt` dropped (v1.2.0) |
 | `medical.json` | `medical` | 545 | 150..6000 | symptoms, diseases, anatomy, drugs, procedures |
 
-Total: **15016 words, ~1108 KiB** (was 6613). Lean by design: Zipf freqs,
+Total: **15024 words, ~1108 KiB** (was 6613). Lean by design: Zipf freqs,
 single tokens, no bloat.
 
 ## Expansion v1.2.0 (2026-09-12, code/math/emoji → full working sets)
@@ -144,7 +145,7 @@ Canonical pack/category IDs (aligned 2026-09-12 across `packs/*.json`,
 `android/ime/.../assets/categories/*.json`, and the Kotlin tab/mapping
 defaults):
 
-`words, ne, js, rust, html, emoji, numbers, math`
+`words, ne, js, rust, html, emoji, numbers, math, medical`
 
 Reconciled renames (done, not pending):
 
