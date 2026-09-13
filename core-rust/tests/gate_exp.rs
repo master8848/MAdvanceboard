@@ -55,6 +55,11 @@ struct CorpusWord {
     seq: String,
     freq: f64,
     cat: String,
+    /// Roman transliteration source when the pack provides one (NE):
+    /// the t9-16 arm re-encodes it under the 16-key pad, mirroring what a
+    /// user of that layout types. Additive field; the frozen split, seqs,
+    /// and every existing arm are untouched.
+    tr: Option<String>,
 }
 
 fn load_corpus() -> (DictionaryStack, Vec<CorpusWord>) {
@@ -99,6 +104,7 @@ fn load_corpus() -> (DictionaryStack, Vec<CorpusWord>) {
                     seq,
                     freq: w.freq.max(1) as f64,
                     cat: w.cat.clone().unwrap_or_else(|| pack.id.clone()),
+                    tr: w.tr.clone(),
                 });
             }
         }
@@ -438,6 +444,68 @@ fn exp2_seq_override_ceiling() {
         base_rate,
         base_rate + top20 / tot_w
     );
+}
+
+/// Step 5 (last resort) — per-category 16-key layout arm (plan/00 remedy
+/// 5, "weak lever — do last"): `t9-16` splits pq/rs + wx/yz, so crowded
+/// t9-9 buckets sharing a 7/9 code (e.g. NE `7262` = sam* + pan*) diverge.
+/// Both digits AND matching move to the 16-key pad (fair layout comparison:
+/// the user types on that pad — digits re-encoded from `tr`/word under the
+/// t9-16 mapping, mirroring the loader's `seq_t916` precedence). Neighbor
+/// OFF (shipped policy; the ON-vs-OFF delta is owned by `exp1d`).
+/// Report-only; the production default stays `t9-9` (MASTER §2 rule 3).
+#[test]
+fn exp3_t916_layout_arm() {
+    use kbcore::{KeyMapping, LayoutRegistry};
+    let now = frozen_now();
+    let (base, held) = load_corpus();
+    let reg = LayoutRegistry::with_builtins();
+    let m16 = reg.get_or_default("t9-16").clone();
+    assert_eq!(m16.layout_id(), "t9-16", "t9-16 built-in must exist");
+    println!("== exp3 t9-16 layout arm (OFF, top-3@4, freq-weighted) ==");
+    for scope in ["words", "NE"] {
+        let (mut b_hit, mut b_tot) = (0.0, 0.0);
+        let (mut s_hit, mut s_tot) = (0.0, 0.0);
+        let (mut n, mut n16, mut nempty) = (0usize, 0usize, 0usize);
+        for w in &held {
+            if w.cat != scope {
+                continue;
+            }
+            let Some(prefix) = op_prefix(&w.seq) else {
+                continue;
+            };
+            n += 1;
+            b_tot += w.freq;
+            let res = base.suggest_no_neighbor_at("", &prefix, &w.cat, LIMIT, now);
+            if rank_of(&res, &w.word).map(|r| r <= 3).unwrap_or(false) {
+                b_hit += w.freq;
+            }
+            // t9-16 digits from the same source the loader precomputes
+            // `seq_t916` from (`tr` when present, else the word).
+            let src = w.tr.as_deref().unwrap_or(&w.word);
+            let seq16 = m16.encode_word(src);
+            if seq16.chars().count() < OP_K {
+                nempty += 1;
+                continue;
+            }
+            n16 += 1;
+            s_tot += w.freq;
+            let p16: String = seq16.chars().take(OP_K).collect();
+            let res16 =
+                base.suggest_for_layout_no_neighbor_at("", &p16, &m16, &w.cat, LIMIT, now);
+            if rank_of(&res16, &w.word).map(|r| r <= 3).unwrap_or(false) {
+                s_hit += w.freq;
+            }
+        }
+        assert!(n > 0, "gate_exp exp3: empty scope for tab {scope:?}");
+        println!(
+            "tab {:<6}: t9-9 OFF={:.3} (n={n})  t9-16 OFF={:.3} (n16={n16} skipped-short={nempty})  delta={:+.3}",
+            scope,
+            b_hit / b_tot,
+            if s_tot > 0.0 { s_hit / s_tot } else { f64::NAN },
+            if s_tot > 0.0 { s_hit / s_tot } else { f64::NAN } - b_hit / b_tot
+        );
+    }
 }
 
 /// 09#2 — bigram-V stability desk spike: 7-day replay with a growing dict
