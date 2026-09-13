@@ -1,4 +1,4 @@
-//! 9-key T9 mapping: encode words to digit sequences, adjacency for fuzzy match.
+//! Layout-driven key→seq encoding (t9-9 default): encode words to digit sequences, adjacency for fuzzy match.
 //!
 //! Layout (3x3 + bottom row):
 //! ```text

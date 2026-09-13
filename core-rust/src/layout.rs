@@ -348,14 +348,17 @@ impl Default for LayoutRegistry {
     }
 }
 
-/// Compiled-in category defaults. NE (`NE` display label and `ne` asset
-/// id) targets `t9-16`: with `03-nepali-transliteration.md` unlanded the
-/// `tr`-model is unavailable, so the finer `pq|rs` + `wx|yz` splits are
-/// the measured collision win (exact collisions 38% -> 33%, 4-digit avg
-/// 2.6 -> 2.0). If `03` lands and `t9-9`+`tr` proves sufficient, move NE
-/// back to the global default. Mirrored in `layouts/cat_map.json`.
-const BUILTIN_CAT_DEFAULTS: &[(&str, &str)] =
-    &[("NE", "t9-16"), ("ne", "t9-16")];
+/// Compiled-in category defaults (plan/02 + MASTER global rule 3:
+/// NE defaults to `t9-9`).
+///
+/// The `tr`-model (plan/03) is landed: Nepali packs carry Roman `tr` seqs
+/// (8005-row `w+tr` pack, v2.0.1), so Roman keystrokes match under the
+/// shared Latin `t9-9` code set and the finer `t9-16` Latin splits buy no
+/// accuracy — only a second pad to maintain. `t9-16` stays registered and
+/// opt-in (user override or pack affinity), but out of the box every tab
+/// — including NE/`ne` — resolves through the global default (`t9-9`).
+/// Mirrored in `layouts/cat_map.json` (empty `cats`: no pinned override).
+const BUILTIN_CAT_DEFAULTS: &[(&str, &str)] = &[];
 
 impl LayoutRegistry {
     pub fn new() -> Self {
@@ -371,8 +374,10 @@ impl LayoutRegistry {
 
     /// Built-ins embedded from `layouts/*.json` at compile time.
     /// `mapping.rs` stays as the fallback if a document fails to parse.
-    /// Seeds the NE -> `t9-16` category default (see
-    /// [`BUILTIN_CAT_DEFAULTS`]).
+    /// No pinned per-tab default out of the box: every tab (including
+    /// NE/`ne`) resolves through the global default (`t9-9`, MASTER rule
+    /// 3). Additional compiled defaults belong in
+    /// [`BUILTIN_CAT_DEFAULTS`] (currently empty).
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
         for src in [
@@ -712,15 +717,17 @@ mod tests {
     }
 
     #[test]
-    fn layout02_builtin_cat_defaults_ne_t9_16() {
-        // NE decision (plan/02, coordinated with plan/03 state): the
-        // `tr`-model is Roman-input based, so the finer Latin splits of
-        // t9-16 still win for NE until 03 proves t9-9+tr sufficient.
+    fn layout02_builtin_cat_defaults_ne_t9_9() {
+        // NE decision (plan/02 + MASTER rule 3, with plan/03 landed): the
+        // `tr`-model matches Roman input under the shared Latin t9-9 code
+        // set, so NE follows the global default (t9-9). t9-16 stays
+        // registered + opt-in, never the out-of-box NE pad.
         let r = registry();
         assert_eq!(r.default_id(), "t9-9");
-        assert_eq!(r.cat_layout_id("NE"), "t9-16");
-        assert_eq!(r.cat_layout_id("ne"), "t9-16");
-        assert_eq!(r.resolve("NE").layout_id(), "t9-16");
+        assert_eq!(r.cat_layout_id("NE"), "t9-9");
+        assert_eq!(r.cat_layout_id("ne"), "t9-9");
+        assert_eq!(r.resolve("NE").layout_id(), "t9-9");
+        assert_eq!(r.resolve("ne").layout_id(), "t9-9");
         assert_eq!(r.resolve("EN").layout_id(), "t9-9");
         assert_eq!(r.resolve("").layout_id(), "t9-9");
         // Clean resolves carry no diagnostic.
@@ -774,7 +781,7 @@ mod tests {
         r.set_default_layout("t9-16").unwrap();
         assert_eq!(r.default_id(), "t9-16");
         assert_eq!(r.resolve("EN").layout_id(), "t9-16");
-        // NE override still wins over the new global.
+        // NE follows the new global (no pinned override out of the box).
         assert_eq!(r.resolve("NE").layout_id(), "t9-16");
         r.set_cat_layout("EN", "t9-12").unwrap();
         assert_eq!(r.resolve("EN").layout_id(), "t9-12");
@@ -799,13 +806,14 @@ mod tests {
         assert_eq!(r.default_id(), "t9-12");
         assert_eq!(r.resolve("NE").layout_id(), "t9-9");
         assert_eq!(r.resolve("EN").layout_id(), "t9-12");
-        // The checked-in file loads and matches the compiled defaults.
+        // The checked-in file loads and matches the compiled defaults:
+        // global t9-9, no pinned per-cat override (NE follows global).
         let src = include_str!("../../layouts/cat_map.json");
         let mut r2 = registry();
         r2.load_cat_map_json(src).unwrap();
         assert_eq!(r2.default_id(), "t9-9");
-        assert_eq!(r2.resolve("NE").layout_id(), "t9-16");
-        assert_eq!(r2.resolve("ne").layout_id(), "t9-16");
+        assert_eq!(r2.resolve("NE").layout_id(), "t9-9");
+        assert_eq!(r2.resolve("ne").layout_id(), "t9-9");
     }
 
     #[test]
@@ -852,8 +860,27 @@ mod tests {
     }
 
     #[test]
-    fn custom_layout_registers_from_json() {
-        let mut r = registry();
+    fn matras_are_non_emitting_under_every_builtin() {
+        // plan/03: matras/virama/signs can never stand alone, so no
+        // built-in spec may map them (their seqs would be spurious `9`s;
+        // Roman `tr` seqs are primary, the Devanagari consonant skeleton
+        // fallback only). Locked for all three pads, not just the frozen
+        // t9-9 reference.
+        let r = registry();
+        for id in ["t9-9", "t9-12", "t9-16"] {
+            let spec = r.get_or_default(id);
+            assert_eq!(spec.encode_word("कि"), "2", "matra must vanish under {id}");
+            assert_eq!(spec.encode_word("नमस्ते"), "5685", "skeleton under {id}");
+            assert_eq!(
+                spec.encode_word("कमल"),
+                "267",
+                "consonants unaffected under {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_layout_registers_from_json() {        let mut r = registry();
         let id = r
             .register_json(
                 r##"{"id":"mini-4","title":"Mini","grid":{"cols":2,"rows":2},
