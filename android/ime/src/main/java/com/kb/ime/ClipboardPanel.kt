@@ -5,13 +5,17 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -21,6 +25,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
@@ -47,8 +52,9 @@ fun IncognitoBanner(
         modifier = modifier
             .fillMaxWidth()
             .background(DarkIncognito)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = "🎭 Incognito — nothing saved",
@@ -56,7 +62,7 @@ fun IncognitoBanner(
             style = MaterialTheme.typography.labelLarge,
             modifier = Modifier
                 .weight(1f)
-                .padding(vertical = 12.dp)
+                .padding(vertical = 8.dp)
         )
         TextButton(onClick = onDismiss) {
             Text("Dismiss", color = Color(0xFFB3C5FF))
@@ -65,9 +71,12 @@ fun IncognitoBanner(
 }
 
 /**
- * Clipboard history panel (plan/11 §3): paste strip contents.
+ * Clipboard history panel (plan/11 §3): compact FlorisBoard-style paste strip.
  *
- * - Pins section on top (📌), recency below; substring search filter.
+ * Collapsed (default): a single 40dp horizontal chip row (latest ~10,
+ * scrollable) + header — no vertical growth at all. Expanded: the full
+ * list capped at 3 compact rows (120dp, 32-40dp items, vertical scroll)
+ * with pins on top, recency below, and substring search.
  * - Tap = paste (host commits raw — never learned, never logged).
  * - Long-press = pin/unpin + delete + full-text preview row.
  * - Clear-all is two-step: first tap arms the confirm row ("Clear pins
@@ -91,120 +100,159 @@ fun ClipboardPanel(
     var query by remember { mutableStateOf("") }
     var confirmClear by remember { mutableStateOf(false) }
     var expandedId by remember { mutableStateOf<String?>(null) }
+    var expanded by remember { mutableStateOf(false) }
     val shown = remember(items, query) { ClipboardHistory.search(items, query) }
     val pins = remember(shown) { shown.filter { it.pinned } }
     val rest = remember(shown) { shown.filterNot { it.pinned } }
 
     Card(
-        modifier = modifier.fillMaxWidth().padding(8.dp),
+        modifier = modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
         shape = ExpressiveCardShape,
         colors = expressiveCardColors(),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
             Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                text = "Clipboard (${items.size})",
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.padding(vertical = 12.dp)
-            )
-            TextButton(onClick = onClose) { Text("Close") }
-        }
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            label = { Text("Search clipboard") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-        if (shown.isEmpty()) {
-            Text(
-                text = if (items.isEmpty()) "Clipboard empty — copies while typing appear here."
-                else "No matches for \"$query\".",
-                style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.padding(16.dp)
-            )
-        } else {
-            LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                if (pins.isNotEmpty()) {
-                    item {
-                        Text(
-                            text = "📌 Pinned",
-                            style = MaterialTheme.typography.labelMedium,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-                        )
-                    }
-                    items(pins, key = { it.id }) { item ->
-                        ClipboardRow(
-                            item = item,
-                            expanded = expandedId == item.id,
-                            onPaste = onPaste,
-                            onToggleExpand = {
-                                expandedId = if (expandedId == item.id) null else item.id
-                            },
-                            onTogglePin = onTogglePin,
-                            onDelete = onDelete,
-                            onError = onError
-                        )
-                    }
-                }
-                if (rest.isNotEmpty()) {
-                    item {
-                        Text(
-                            text = "Recent",
-                            style = MaterialTheme.typography.labelMedium,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-                        )
-                    }
-                    items(rest, key = { it.id }) { item ->
-                        ClipboardRow(
-                            item = item,
-                            expanded = expandedId == item.id,
-                            onPaste = onPaste,
-                            onToggleExpand = {
-                                expandedId = if (expandedId == item.id) null else item.id
-                            },
-                            onTogglePin = onTogglePin,
-                            onDelete = onDelete,
-                            onError = onError
-                        )
-                    }
-                }
-            }
-        }
-        if (!confirmClear) {
-            TextButton(onClick = { confirmClear = true }) { Text("Clear…") }
-        } else {
-            Column(modifier = Modifier.fillMaxWidth()) {
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    text = "Clear pins too?",
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                    text = "📋 ${items.size}",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(vertical = 4.dp)
                 )
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    TextButton(onClick = {
-                        confirmClear = false
-                        try {
-                            onClearUnpinned()
-                        } catch (e: Exception) {
-                            onError("Clear failed: ${e.message}")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (shown.size > 1) {
+                        TextButton(onClick = { expanded = !expanded }) {
+                            Text(if (expanded) "Less" else "More")
                         }
-                    }) { Text("Keep pins") }
-                    TextButton(onClick = {
-                        confirmClear = false
-                        try {
-                            onClearAll()
-                        } catch (e: Exception) {
-                            onError("Clear failed: ${e.message}")
-                        }
-                    }) { Text("Clear everything") }
-                    TextButton(onClick = { confirmClear = false }) { Text("Cancel") }
+                    }
+                    TextButton(onClick = onClose) { Text("Close") }
                 }
             }
-        }
+            if (shown.isEmpty()) {
+                Text(
+                    text = if (items.isEmpty()) "Clipboard empty — copies while typing appear here."
+                    else "No matches for \"$query\".",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(8.dp)
+                )
+            } else if (!expanded) {
+                // Compact strip: one horizontal chip row, tap to paste,
+                // long-press to pin/delete. "More" opens the full list.
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(shown.take(10), key = { it.id }) { item ->
+                        FilterChip(
+                            selected = false,
+                            onClick = {
+                                try {
+                                    onPaste(item)
+                                } catch (e: Exception) {
+                                    onError("Paste failed: ${e.message}")
+                                }
+                            },
+                            label = {
+                                Text(
+                                    text = (if (item.pinned) "📌 " else "") + item.text,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.heightIn(max = 36.dp)
+                                )
+                            }
+                        )
+                    }
+                }
+            } else {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text("Search clipboard") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                // Max 3 compact rows visible; the rest scrolls vertically.
+                LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 120.dp)) {
+                    if (pins.isNotEmpty()) {
+                        item {
+                            Text(
+                                text = "📌 Pinned",
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+                            )
+                        }
+                        items(pins, key = { it.id }) { item ->
+                            ClipboardRow(
+                                item = item,
+                                expanded = expandedId == item.id,
+                                onPaste = onPaste,
+                                onToggleExpand = {
+                                    expandedId = if (expandedId == item.id) null else item.id
+                                },
+                                onTogglePin = onTogglePin,
+                                onDelete = onDelete,
+                                onError = onError
+                            )
+                        }
+                    }
+                    if (rest.isNotEmpty()) {
+                        item {
+                            Text(
+                                text = "Recent",
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+                            )
+                        }
+                        items(rest, key = { it.id }) { item ->
+                            ClipboardRow(
+                                item = item,
+                                expanded = expandedId == item.id,
+                                onPaste = onPaste,
+                                onToggleExpand = {
+                                    expandedId = if (expandedId == item.id) null else item.id
+                                },
+                                onTogglePin = onTogglePin,
+                                onDelete = onDelete,
+                                onError = onError
+                            )
+                        }
+                    }
+                }
+            }
+            if (!confirmClear) {
+                TextButton(onClick = { confirmClear = true }) { Text("Clear…") }
+            } else {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Clear pins too?",
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+                    )
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        TextButton(onClick = {
+                            confirmClear = false
+                            try {
+                                onClearUnpinned()
+                            } catch (e: Exception) {
+                                onError("Clear failed: ${e.message}")
+                            }
+                        }) { Text("Keep pins") }
+                        TextButton(onClick = {
+                            confirmClear = false
+                            try {
+                                onClearAll()
+                            } catch (e: Exception) {
+                                onError("Clear failed: ${e.message}")
+                            }
+                        }) { Text("Clear everything") }
+                        TextButton(onClick = { confirmClear = false }) { Text("Cancel") }
+                    }
+                }
+            }
         }
     }
 }
@@ -224,6 +272,7 @@ private fun ClipboardRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = 32.dp, max = 40.dp)
                 .combinedClickable(
                     onClick = {
                         try {
@@ -234,13 +283,15 @@ private fun ClipboardRow(
                     },
                     onLongClick = onToggleExpand
                 )
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = (if (item.pinned) "📌 " else "") + item.text,
-                maxLines = if (expanded) Int.MAX_VALUE else 2,
+                maxLines = if (expanded) Int.MAX_VALUE else 1,
                 overflow = if (expanded) TextOverflow.Visible else TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f)
             )
         }
