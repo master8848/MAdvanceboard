@@ -61,4 +61,5 @@ dependencies {
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)
     implementation(libs.compose.runtime)
+    testImplementation(libs.junit4)
 }
