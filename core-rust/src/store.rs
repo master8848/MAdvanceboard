@@ -697,4 +697,86 @@ mod tests {
         assert!(rec.dict.is_empty());
         let _ = fs::remove_dir_all(&d);
     }
+
+    #[test]
+    fn db_under_5mb_at_30d_volume() {
+        // Plan/14 acceptance: 10k personal + 5k events + 2k context rows
+        // (a heavy 30-day user) must stay under 5MB total. Rows go through
+        // direct SQL in one transaction for speed, but the row shapes are
+        // identical to what the flush paths write.
+        let d = tmp_dir("kbcore_store_30d");
+        let db = d.join("kb.sqlite");
+        let mut store = Store::open(&db).unwrap();
+        {
+            let tx = store.conn.transaction().unwrap();
+            {
+                let mut ins = tx
+                    .prepare(
+                        "INSERT INTO personal
+                         (key, word, category, count, acc, rej, last_seen, deleted)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, 0)",
+                    )
+                    .unwrap();
+                for i in 0..10_000 {
+                    ins.execute(rusqlite::params![
+                        format!("w{i:05}"),
+                        format!("w{i:05}"),
+                        ["EN", "ne", "js"][(i % 3) as usize],
+                        (1 + i % 97) as i64,
+                        (1 + i % 97) as i64,
+                        1_700_000_000i64 + (i % 30) as i64 * 86_400,
+                    ])
+                    .unwrap();
+                }
+            }
+            {
+                let mut ins = tx
+                    .prepare(
+                        "INSERT INTO session_events
+                         (ts, seq, ctx, chosen, shown_json, action)
+                         VALUES (?1, '43556', 'say', ?2, '[\"hello\"]', 'accepted')",
+                    )
+                    .unwrap();
+                for i in 0..5000 {
+                    ins.execute(rusqlite::params![
+                        1_700_000_000i64 + i as i64 * 500,
+                        format!("w{:05}", i % 1000),
+                    ])
+                    .unwrap();
+                }
+            }
+            {
+                let mut ins = tx
+                    .prepare("INSERT INTO context_counts (word, bucket, count) VALUES (?1, ?2, ?3)")
+                    .unwrap();
+                for i in 0..2000 {
+                    ins.execute(rusqlite::params![
+                        format!("w{i:05}"),
+                        (i % 8) as i64,
+                        (1 + i % 50) as i64,
+                    ])
+                    .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+        store.checkpoint_now().unwrap();
+        drop(store);
+        let db_bytes = fs::metadata(&db).unwrap().len();
+        // WAL sibling of "kb.sqlite" is "kb.sqlite-wal" (= with_extension).
+        let wal_bytes = fs::metadata(db.with_extension("sqlite-wal"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let total = db_bytes + wal_bytes;
+        println!(
+            "size: personal=10000 events=5000 context=2000 db={db_bytes}B wal={wal_bytes}B \
+             total={total}B (budget 5MB = {}B)",
+            5 * 1024 * 1024,
+        );
+        assert!(
+            total < 5 * 1024 * 1024,
+            "30-day DB must stay under 5MB, got {total}B"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
 }

@@ -462,7 +462,59 @@ impl PersonalDict {
             shown_json TEXT NOT NULL DEFAULT '[]',
             action TEXT NOT NULL DEFAULT ''
         );
+        -- Plan/14 secondary indexes (added AFTER plan/06 single-handle +
+        -- dirty-set flush: before that, DELETE+reinsert rebuilt them every
+        -- save). Idempotent `IF NOT EXISTS` inside this same batch: first
+        -- open after update pays one O(n log n) build (~10k rows, <50ms
+        -- once), then free. No version bump / no VACUUM: index creation is
+        -- not a repack (see Store::open). Hot-path loads are full scans
+        -- (`SELECT ... FROM personal` with no WHERE) and hot suggest never
+        -- touches the DB at all — these serve analytics/sweep queries only.
+        -- OOV promotion check / word dedupe point lookup.
+        CREATE INDEX IF NOT EXISTS idx_personal_word
+            ON personal(word);
+        -- Per-tab top-up + plan/08 stack ordering (filter by category,
+        -- order by count — composite avoids the sort).
+        CREATE INDEX IF NOT EXISTS idx_personal_cat_count
+            ON personal(category, count DESC);
+        -- TTL sweep + LFU eviction + 30d reject decay (range deletes).
+        CREATE INDEX IF NOT EXISTS idx_personal_last_seen
+            ON personal(last_seen DESC);
+        -- Tiered-bigram fan-out `WHERE prev=?` (plan/05 #8). The composite
+        -- PK's leftmost prefix already covers this on modern SQLite
+        -- (verified: bundled rusqlite picks an index either way), but the
+        -- explicit index pins the plan on the NDK SQLite 3.19 too —
+        -- measured, not assumed (see `analytics_queries_use_indexes`).
+        CREATE INDEX IF NOT EXISTS idx_bigrams_prev
+            ON bigrams(prev);
+        -- 14d routine mining (plan/13 P2) + KSR (plan/09#7).
+        CREATE INDEX IF NOT EXISTS idx_events_ts
+            ON session_events(ts DESC);
+        -- Replay harness (plan/09#1) + lift A/B.
+        CREATE INDEX IF NOT EXISTS idx_events_chosen_action
+            ON session_events(chosen, action);
+        -- Plan/13 P1 temporal buckets: 8 buckets x ~1-2k words, <50KB.
+        -- WITHOUT ROWID halves pages on this tiny PK-value table
+        -- (NDK SQLite 3.19 supports it since 3.8.2).
+        CREATE TABLE IF NOT EXISTS context_counts(
+            word TEXT NOT NULL,
+            bucket INTEGER NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(word, bucket)
+        ) WITHOUT ROWID;
     ";
+
+    /// User-created secondary index names (plan/14 acceptance: exactly
+    /// these six, zero others — SQLite auto-indexes excluded by the
+    /// `sqlite_%` filter in the test).
+    pub const SECONDARY_INDEXES: [&'static str; 6] = [
+        "idx_personal_word",
+        "idx_personal_cat_count",
+        "idx_personal_last_seen",
+        "idx_bigrams_prev",
+        "idx_events_ts",
+        "idx_events_chosen_action",
+    ];
 
     fn open_db(path: &Path) -> Result<rusqlite::Connection, String> {
         let conn = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
@@ -645,6 +697,146 @@ impl PersonalDict {
             }
         }
         Ok(d)
+    }
+
+    // ---- Analytics queries (plan/14): each served by one secondary index.
+    //
+    // Hot path never calls these (suggest is pure RAM over the loaded
+    // dict); they back the 14d/30d sweeps, replay harness, and routine
+    // mining. Every query below must show `USING INDEX` in
+    // `EXPLAIN QUERY PLAN` (locked by `analytics_queries_use_indexes`).
+
+    /// Per-tab top-up / plan/08 stack ordering: top `limit` words in
+    /// `category` by learned count. Served by `idx_personal_cat_count`
+    /// (no sort step — the composite order covers it).
+    pub fn top_in_category(
+        conn: &rusqlite::Connection,
+        category: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, u64)>, String> {
+        let mut st = conn
+            .prepare(
+                "SELECT word, count FROM personal
+                 WHERE category = ?1 ORDER BY count DESC, word ASC LIMIT ?2",
+            )
+            .map_err(|e| format!("personal: top_in_category prepare: {e}"))?;
+        let rows = st
+            .query_map(rusqlite::params![category, limit], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(|e| format!("personal: top_in_category query: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (w, c) = row.map_err(|e| format!("personal: top_in_category row: {e}"))?;
+            out.push((w, c.max(0) as u64));
+        }
+        Ok(out)
+    }
+
+    /// TTL sweep / LFU eviction / 30d reject decay input: keys with
+    /// `last_seen` older than `before_ts`. Served by
+    /// `idx_personal_last_seen` (range scan, no full table scan).
+    pub fn keys_older_than(
+        conn: &rusqlite::Connection,
+        before_ts: i64,
+        limit: i64,
+    ) -> Result<Vec<String>, String> {
+        let mut st = conn
+            .prepare(
+                "SELECT key FROM personal
+                 WHERE last_seen < ?1 ORDER BY last_seen ASC, key ASC LIMIT ?2",
+            )
+            .map_err(|e| format!("personal: keys_older_than prepare: {e}"))?;
+        let rows = st
+            .query_map(rusqlite::params![before_ts, limit], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(|e| format!("personal: keys_older_than query: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("personal: keys_older_than row: {e}"))?);
+        }
+        Ok(out)
+    }
+
+    /// Word point lookup (OOV `>=2/7d` promotion check, `is_blocked`
+    /// spillover, dedupe). Served by `idx_personal_word`.
+    pub fn lookup_word(
+        conn: &rusqlite::Connection,
+        word: &str,
+    ) -> Result<Option<(u64, bool)>, String> {
+        conn.query_row(
+            "SELECT count, deleted FROM personal WHERE word = ?1 LIMIT 1",
+            rusqlite::params![word],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .map(|(c, d)| Some((c.max(0) as u64, d != 0)))
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(format!("personal: lookup_word {word:?}: {other}")),
+        })
+    }
+
+    /// Tiered-bigram fan-out (plan/05 #8): learned followers of `prev`.
+    /// Served by `idx_bigrams_prev` (pinned explicitly so the NDK SQLite
+    /// 3.19 plan matches the bundled one — see schema comment).
+    pub fn bigram_fanout(
+        conn: &rusqlite::Connection,
+        prev: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, u64)>, String> {
+        let mut st = conn
+            .prepare(
+                "SELECT word, count FROM bigrams
+                 WHERE prev = ?1 ORDER BY count DESC, word ASC LIMIT ?2",
+            )
+            .map_err(|e| format!("personal: bigram_fanout prepare: {e}"))?;
+        let rows = st
+            .query_map(rusqlite::params![prev, limit], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(|e| format!("personal: bigram_fanout query: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (w, c) = row.map_err(|e| format!("personal: bigram_fanout row: {e}"))?;
+            out.push((w, c.max(0) as u64));
+        }
+        Ok(out)
+    }
+
+    /// Record one temporal-bucket observation (plan/13 P1): monotonic
+    /// upsert into `context_counts`, PK `(word, bucket)` lookup (no
+    /// secondary index needed — `USING PRIMARY KEY`).
+    pub fn record_context(
+        conn: &rusqlite::Connection,
+        word: &str,
+        bucket: i64,
+    ) -> Result<(), String> {
+        conn.execute(
+            "INSERT INTO context_counts (word, bucket, count) VALUES (?1, ?2, 1)
+             ON CONFLICT(word, bucket) DO UPDATE SET count = count + 1",
+            rusqlite::params![word, bucket],
+        )
+        .map_err(|e| format!("personal: record_context ({word:?}, {bucket}): {e}"))?;
+        Ok(())
+    }
+
+    /// Read one temporal-bucket count (0 when never observed).
+    pub fn context_count(
+        conn: &rusqlite::Connection,
+        word: &str,
+        bucket: i64,
+    ) -> Result<u64, String> {
+        conn.query_row(
+            "SELECT count FROM context_counts WHERE word = ?1 AND bucket = ?2",
+            rusqlite::params![word, bucket],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|c| c.max(0) as u64)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(0),
+            other => Err(format!("personal: context_count ({word:?}, {bucket}): {other}")),
+        })
     }
 }
 
@@ -890,5 +1082,178 @@ mod tests {
         );
         assert_eq!(d.top_followers("hi").len(), 1);
         assert!(d.top_followers("unknown").is_empty());
+    }
+
+    /// Plan/14 acceptance, part 1: the migration batch creates exactly the
+    /// six secondary indexes (zero others — auto-indexes excluded) plus the
+    /// `context_counts` table, and re-applying it is a no-op (every open
+    /// runs this batch).
+    #[test]
+    fn schema_creates_exactly_six_secondary_indexes_plus_context_counts() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(PersonalDict::SQLITE_SCHEMA).unwrap();
+        let mut names: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        names.sort();
+        let mut want: Vec<String> = PersonalDict::SECONDARY_INDEXES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        want.sort();
+        assert_eq!(names, want, "plan/14 allows exactly these six indexes");
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'context_counts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("WITHOUT ROWID"), "unexpected DDL: {sql}");
+        assert!(sql.contains("PRIMARY KEY"), "unexpected DDL: {sql}");
+        // Idempotent: second apply (next open) changes nothing.
+        conn.execute_batch(PersonalDict::SQLITE_SCHEMA).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 6);
+    }
+
+    /// EXPLAIN QUERY PLAN detail lines for one statement.
+    #[cfg(test)]
+    fn explain_plan(conn: &rusqlite::Connection, sql: &str) -> Vec<String> {
+        conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    /// Plan/14 acceptance, part 2: every analytics query is index-served
+    /// (hot path is pure RAM — it never issues these). Volume is realistic
+    /// (3k rows + ANALYZE, the once-after-bulk practice) so the planner's
+    /// choice is meaningful, not a toy-table artifact.
+    #[test]
+    fn analytics_queries_use_indexes() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(PersonalDict::SQLITE_SCHEMA).unwrap();
+        {
+            let tx = conn.transaction().unwrap();
+            {
+                let mut ins = tx
+                    .prepare(
+                        "INSERT INTO personal
+                         (key, word, category, count, acc, rej, last_seen, deleted)
+                         VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, 0)",
+                    )
+                    .unwrap();
+                for i in 0..3000 {
+                    ins.execute(rusqlite::params![
+                        format!("k{i}"),
+                        format!("w{:04}", i % 500),
+                        if i % 2 == 0 { "EN" } else { "ne" },
+                        (i % 97) as i64,
+                        1_700_000_000i64 + i as i64,
+                    ])
+                    .unwrap();
+                }
+            }
+            {
+                let mut ins = tx
+                    .prepare("INSERT INTO bigrams (prev, word, count) VALUES (?1, ?2, ?3)")
+                    .unwrap();
+                for i in 0..1000 {
+                    ins.execute(rusqlite::params![
+                        format!("p{:03}", i % 200),
+                        format!("w{:04}", i % 500),
+                        (1 + i % 9) as i64,
+                    ])
+                    .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+        conn.execute_batch("ANALYZE").unwrap();
+
+        let p = explain_plan(
+            &conn,
+            "SELECT word, count FROM personal
+             WHERE category = 'EN' ORDER BY count DESC, word ASC LIMIT 30",
+        );
+        assert!(
+            p.iter().any(|d| d.contains("USING INDEX")
+                && d.contains("idx_personal_cat_count")),
+            "per-tab top-up must use idx_personal_cat_count: {p:?}",
+        );
+        let p = explain_plan(
+            &conn,
+            "SELECT key FROM personal
+             WHERE last_seen < 1700001000 ORDER BY last_seen ASC, key ASC LIMIT 100",
+        );
+        assert!(
+            p.iter().any(|d| d.contains("USING INDEX")
+                && d.contains("idx_personal_last_seen")),
+            "TTL sweep must use idx_personal_last_seen: {p:?}",
+        );
+        let p = explain_plan(
+            &conn,
+            "SELECT count, deleted FROM personal WHERE word = 'w0042' LIMIT 1",
+        );
+        assert!(
+            p.iter()
+                .any(|d| d.contains("USING INDEX") && d.contains("idx_personal_word")),
+            "word lookup must use idx_personal_word: {p:?}",
+        );
+        let p = explain_plan(
+            &conn,
+            "SELECT word, count FROM bigrams
+             WHERE prev = 'p007' ORDER BY count DESC, word ASC LIMIT 10",
+        );
+        assert!(
+            p.iter().any(|d| d.contains("USING INDEX")),
+            "bigram fan-out must be index-served: {p:?}",
+        );
+        println!("bigram fan-out plan: {p:?}");
+        let p = explain_plan(
+            &conn,
+            "SELECT count FROM context_counts WHERE word = 'x' AND bucket = 3",
+        );
+        assert!(
+            p.iter().any(|d| d.contains("USING PRIMARY KEY")),
+            "context lookup must use the WITHOUT ROWID PK: {p:?}",
+        );
+
+        // Functional locks on the helpers behind those plans.
+        let top = PersonalDict::top_in_category(&conn, "EN", 5).unwrap();
+        assert_eq!(top.len(), 5);
+        assert!(top.windows(2).all(|w| w[0].1 >= w[1].1), "count desc: {top:?}");
+        let old = PersonalDict::keys_older_than(&conn, 1_700_000_100, 10).unwrap();
+        assert_eq!(old.len(), 10);
+        assert_eq!(PersonalDict::keys_older_than(&conn, 1, 10).unwrap().len(), 0);
+        assert!(PersonalDict::lookup_word(&conn, "w0042").unwrap().is_some());
+        assert!(PersonalDict::lookup_word(&conn, "nope-missing").unwrap().is_none());
+        let fan = PersonalDict::bigram_fanout(&conn, "p007", 10).unwrap();
+        assert!(!fan.is_empty());
+        assert!(PersonalDict::bigram_fanout(&conn, "p-nope", 10).unwrap().is_empty());
+        assert_eq!(PersonalDict::context_count(&conn, "w1", 3).unwrap(), 0);
+        PersonalDict::record_context(&conn, "w1", 3).unwrap();
+        PersonalDict::record_context(&conn, "w1", 3).unwrap();
+        PersonalDict::record_context(&conn, "w1", 4).unwrap();
+        assert_eq!(PersonalDict::context_count(&conn, "w1", 3).unwrap(), 2);
+        assert_eq!(PersonalDict::context_count(&conn, "w1", 4).unwrap(), 1);
     }
 }

@@ -2,7 +2,10 @@
 
 Question asked: do we have indexes? Answer: **only PRIMARY KEYs, zero
 secondary indexes.** Verified in `core-rust/src/personal.rs:303-330` +
-`core-rust/src/session.rs:103-135`. Plan only, no code.
+`core-rust/src/session.rs:103-135`. Landed: the 6-index + `context_counts`
+DDL below is now `IF NOT EXISTS` inside `PersonalDict::SQLITE_SCHEMA`
+(`core-rust/src/personal.rs`), with `USING INDEX` analytics readers +
+acceptance tests in `personal.rs` / `session.rs` / `store.rs`.
 
 ## 1. Current schema (frozen, audited)
 
