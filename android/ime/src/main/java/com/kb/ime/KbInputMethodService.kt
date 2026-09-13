@@ -20,6 +20,7 @@ import androidx.lifecycle.Lifecycle
 import com.kb.bridge.KbCore
 import com.kb.bridge.Predictor
 import com.kb.bridge.PredictorFactory
+import com.kb.bridge.QwertyResult
 import com.kb.bridge.StubPredictor
 import com.kb.plugin.CategoryLoadOutcome
 import com.kb.plugin.CategoryRegistry
@@ -104,6 +105,40 @@ class KbInputMethodService : InputMethodService() {
     private val seq = StringBuilder()
     private val qwertyBuffer = StringBuilder()
 
+    /**
+     * Last auto-correct commit for backspace-restore (plan/22 Step 2).
+     * Set ONLY when QWERTY Space takes a correction; consumed by the next
+     * `⌫` when the committed text is still at the cursor (verified via
+     * text-before-cursor, never assumed). Tap-commits for emoji/code
+     * preserve it ([commitCandidateWithTerminator] `preserveAuto`); every
+     * fresh word commit clears it.
+     */
+    private var lastAuto: LastAuto? = null
+    private data class LastAuto(
+        val literal: String,
+        val corrected: String,
+        /** Exact committed span (`corrected + terminator`) for cursor verification. */
+        val committed: String,
+        val ts: Long
+    )
+    /**
+     * Revert-suppression (plan/22): after a backspace-restore the user
+     * explicitly rejected the correction — Space must not re-take it for
+     * the same buffer. Cleared by any buffer change or commit.
+     */
+    private var suppressAutoFor: String? = null
+    /** Last QWERTY result + the buffer snapshot it was computed for. */
+    private var lastQwerty: QwertyResult? = null
+    private var lastQwertyFor: String? = null
+    /** Double-space period state (plan/22 Step 2): last space tap + whether it ended a word. */
+    private var lastSpaceTs: Long = 0L
+    private var lastSpaceBreak: Boolean = false
+    /**
+     * Correction policy (plan/22 Step 3). Settings surface belongs to
+     * plan/19 — until then STANDARD ships. Per-field safety
+     * (password/URI force the literal) is automatic, not a setting.
+     */
+    internal var correctionMode: CorrectionMode = CorrectionMode.STANDARD
     /** Active category as canonical asset id (`words`, `ne`, …).
      * Legacy display labels `EN`/`NE` still map (compat); consults manifest learn flags. */
     private var activeAssetId: String = "words"
@@ -520,6 +555,7 @@ class KbInputMethodService : InputMethodService() {
         refreshIncognitoState()
         seq.clear()
         qwertyBuffer.clear()
+        clearQwertyAutoState()
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
@@ -616,6 +652,7 @@ class KbInputMethodService : InputMethodService() {
         seq.clear()
         qwertyBuffer.clear()
         liveCandidates = emptyList()
+        clearQwertyAutoState()
         // IME hide wipes snippet state (plan 12:62): nothing carries over.
         snippetBuffer.clear()
         liveSnippets = emptyList()
@@ -631,6 +668,7 @@ class KbInputMethodService : InputMethodService() {
         }
         seq.clear()
         qwertyBuffer.clear()
+        clearQwertyAutoState()
         snippetBuffer.clear()
         liveSnippets = emptyList()
         super.onFinishInputView(finishingInput)
@@ -694,6 +732,9 @@ class KbInputMethodService : InputMethodService() {
                 ic.performEditorAction(action)
             } else {
                 ic.commitText("\n", 1)
+                // Auto-caps wire (plan/22): a committed newline restarts caps.
+                capsNext = true
+                lastSpaceBreak = false
             }
             true
         } catch (_: Exception) {
@@ -774,7 +815,8 @@ class KbInputMethodService : InputMethodService() {
             if (result.isNotEmpty()) {
                 lastShown = result.map { it.word }
                 liveCandidates = result.map { it.word }
-                commitCandidate(result.first().word)
+                // Emoji tap-commit preserves lastAuto (plan/01 amendment).
+                commitCandidate(result.first().word, clearAuto = false)
             } else {
                 gestureLog.record("pad", "tap", "emoji-no-match", snapshot)
                 liveCandidates = emptyList()
@@ -883,13 +925,16 @@ class KbInputMethodService : InputMethodService() {
     }
 
     /**
-     * QWERTY encoder: raw committed letters feed the SAME [Predictor.suggest]
-     * as T9 digits — only this encoder differs ([qwertyFallback] selects it).
+    /**
+     * QWERTY encoder: raw committed letters feed [refreshQwertySuggestions]
+     * (ONE `suggestQwerty` FFI per keystroke: literal + letter-graph
+     * corrections + confidence — plan/22 Step 2). Space is [onQwertySpace]
+     * (confidence-gated commit + double-space period); the buffer change
+     * clears a revert-suppression from a previous restore.
      */
     internal fun onQwertyKey(text: String) {
         if (text == " ") {
-            // Space breaks the word: accept the buffer (learn path reused).
-            if (qwertyBuffer.isNotEmpty()) commitCandidate(qwertyBuffer.toString()) else commitText(" ")
+            onQwertySpace("key")
             return
         }
         if (!predictionEnabled) {
@@ -897,11 +942,86 @@ class KbInputMethodService : InputMethodService() {
             return
         }
         qwertyBuffer.append(text)
+        if (qwertyBuffer.toString() != suppressAutoFor) suppressAutoFor = null
         currentInputConnection?.setComposingText(qwertyBuffer.toString(), 1)
         // Lazy snippet sweep; the html/math static palette filters on this prefix.
         refreshSnippetStrip()
         refreshQwertySuggestions(qwertyBuffer.toString())
     }
+
+    /**
+     * QWERTY Space (plan/22 Step 2) — the AUTHORITATIVE space path (plan/01
+     * amendment): physical Space, QWERTY fling-`→`, and Pad flings all land
+     * here, never on a separate `commitCandidate(top)` (two space paths
+     * with different confidence handling invite accidental autocorrect).
+     *
+     * - Composing: commit the top correction + record [lastAuto] ONLY when
+     *   the result is fresh, confident, and autocorrect is allowed
+     *   (mode + non-password/URI field); else the verbatim literal.
+     *   A revert-suppressed buffer always takes the literal.
+     * - Empty buffer: double-space (within [DOUBLE_SPACE_MS] after a word
+     *   break) rewrites to `. ` + caps; else a plain word-break space.
+     * Never autocorrects in password/URI fields ([autocorrectAllowedNow]).
+     */
+    internal fun onQwertySpace(source: String = "key") {
+        gestureLog.record("qwerty", source, "space")
+        val now = System.currentTimeMillis()
+        val buf = qwertyBuffer.toString()
+        if (buf.isEmpty()) {
+            if (QwertyDecisions.isDoubleSpace(now, lastSpaceTs, lastSpaceBreak, DOUBLE_SPACE_MS)) {
+                try {
+                    currentInputConnection?.deleteSurroundingText(1, 0)
+                    commitText(". ")
+                    captureOwnCommit(". ")
+                } catch (e: Exception) {
+                    reportGestureError("Double-space period failed: ${e.message}")
+                }
+                capsNext = true
+                lastCommitWord = null
+                lastSpaceBreak = false
+            } else {
+                commitText(" ")
+                lastSpaceBreak = true
+            }
+            lastSpaceTs = now
+            return
+        }
+        val res = lastQwerty.takeIf { lastQwertyFor == buf }
+        val top = res?.corrections?.firstOrNull()
+        val term = if (autoSpaceUi) " " else ""
+        if (top != null && res?.confident == true &&
+            buf != suppressAutoFor && autocorrectAllowedNow()
+        ) {
+            commitCandidateWithTerminator(top.word, term, clearAuto = false)
+            lastAuto = LastAuto(buf, top.word, top.word + term, now)
+            gestureLog.record("qwerty", source, "autocorrect", "$buf->${top.word}")
+        } else {
+            commitCandidateWithTerminator(buf, term, clearAuto = false)
+            lastAuto = null
+        }
+        suppressAutoFor = null
+        lastSpaceTs = now
+        lastSpaceBreak = true
+    }
+
+    /** Confidence threshold for [correctionMode] (plan/22 Step 1). */
+    private fun correctionThreshold(): Double = when (correctionMode) {
+        CorrectionMode.AGGRESSIVE -> 0.5
+        CorrectionMode.STANDARD -> 1.0
+        CorrectionMode.CONSERVATIVE -> 2.0
+        CorrectionMode.SUGGEST_ONLY -> Double.POSITIVE_INFINITY
+        CorrectionMode.OFF -> Double.POSITIVE_INFINITY
+    }
+
+    /**
+     * Per-field autocorrect safety (plan/22: automatic, not a setting):
+     * password and email/URI fields always take the literal — suggestions
+     * still show, Space never corrects.
+     */
+    private fun autocorrectAllowedNow(): Boolean =
+        predictionEnabled && !isPasswordField && !isEmailOrUri &&
+            correctionMode != CorrectionMode.SUGGEST_ONLY &&
+            correctionMode != CorrectionMode.OFF
 
     internal fun onQwertyEnter() {
         if (qwertyBuffer.isNotEmpty()) commitCandidate(qwertyBuffer.toString())
@@ -942,38 +1062,52 @@ class KbInputMethodService : InputMethodService() {
     }
 
     /**
-     * QWERTY encoder: raw letters → engine `encode` under the active pad →
-     * digit seq → shared suggest path. Only this encoder differs from T9
-     * (two FFI calls per keystroke: encode + suggest; still no per-word
-     * chatter). Unencodable buffers clear the strip explicitly.
+     * QWERTY suggest: ONE engine call per keystroke (plan/22 Step 2 —
+     * `suggestQwerty` carries literal + corrections + confidence; the old
+     * `encode` + `suggest` two-call path is retired). Strip order puts the
+     * would-be-committed form first (correction when confident, else the
+     * literal — tap-#1 always equals what Space does). Stale results
+     * (buffer moved on) are dropped, so Space without a fresh confident
+     * result keeps the literal — never an autocorrect on stale data.
+     * OFF mode skips the fetch (literal-only typing).
      */
     private fun refreshQwertySuggestions(raw: String) {
+        if (correctionMode == CorrectionMode.OFF) {
+            lastShown = emptyList()
+            liveCandidates = emptyList()
+            lastQwerty = null
+            lastQwertyFor = null
+            return
+        }
         val snapshot = raw
         val layoutId = activeLayoutId
         val tab = activeAssetId
+        val threshold = correctionThreshold()
         serviceScope.launch {
             val p = predictor
             if (p == null) return@launch
             val prev = prevWord()
-            val seq = try {
-                p.encode(snapshot, layoutId)
-            } catch (e: Exception) {
-                reportGestureError("Encode failed: ${e.message}")
-                return@launch
-            }
-            if (seq.isEmpty()) {
-                lastShown = emptyList()
-                liveCandidates = emptyList()
-                return@launch
-            }
             val result = try {
-                suggestWithLayout(p, seq, prev, layoutId, tab, EXPAND_LIMIT)
+                p.suggestQwerty(snapshot, prev.orEmpty(), tab, layoutId, EXPAND_LIMIT, threshold)
             } catch (e: Exception) {
                 reportGestureError("Suggest failed: ${e.message}")
-                emptyList()
+                return@launch
             }
-            lastShown = result.map { it.word }
-            liveCandidates = result.map { it.word }
+            if (qwertyBuffer.toString() != snapshot) return@launch
+            lastQwerty = result
+            lastQwertyFor = snapshot
+            val rest = result.corrections.map { it.word }
+            liveCandidates = if (result.confident && rest.isNotEmpty()) {
+                listOf(rest.first(), result.literal) + rest.drop(1)
+            } else {
+                listOf(result.literal) + rest
+            }
+            lastShown = liveCandidates.filter { it != result.literal }
+            android.util.Log.d(
+                "KbIME",
+                "qwerty raw=$snapshot tab=$tab -> literal=${result.literal} " +
+                    "top=${rest.firstOrNull()} confident=${result.confident}"
+            )
         }
     }
 
@@ -1323,8 +1457,8 @@ class KbInputMethodService : InputMethodService() {
         refreshSnippetStrip()
     }
 
-    private fun commitCandidate(word: String) {
-        commitCandidateWithTerminator(word, " ")
+    private fun commitCandidate(word: String, clearAuto: Boolean = true) {
+        commitCandidateWithTerminator(word, if (autoSpaceUi) " " else "", clearAuto)
     }
 
     /**
@@ -1332,8 +1466,25 @@ class KbInputMethodService : InputMethodService() {
      * learning) when [shouldLearnNow]. Tracks the commit for the 5s
      * reject window (SPEC §2: deleting a committed word within 5s, or
      * picking another candidate, records a reject).
+     *
+     * [clearAuto]: fresh word commits (strip taps, Space) clear the
+     * QWERTY [lastAuto]/[suppressAutoFor] state — the text context moved
+     * on, a restore would corrupt it. Emoji/code tap-commits pass
+     * `clearAuto = false` (plan/01 amendment: they must not clear the
+     * [lastAuto] needed for backspace-restore); [onQwertySpace] manages
+     * the state itself and also passes false.
      */
-    private fun commitCandidateWithTerminator(word: String, terminator: String) {
+    private fun commitCandidateWithTerminator(
+        word: String,
+        terminator: String,
+        clearAuto: Boolean = true,
+        romanResolved: Boolean = false
+    ) {
+        clearToolbarRedo()
+        if (clearAuto) {
+            lastAuto = null
+            suppressAutoFor = null
+        }
         val layoutId = activeLayoutId
         val text = if (capsNext) word.replaceFirstChar { it.uppercase() } else word
         capsNext = false
@@ -1407,17 +1558,88 @@ class KbInputMethodService : InputMethodService() {
         }
         if (qwertyBuffer.isNotEmpty()) {
             qwertyBuffer.deleteCharAt(qwertyBuffer.length - 1)
+            if (qwertyBuffer.toString() != suppressAutoFor) suppressAutoFor = null
             if (qwertyBuffer.isEmpty()) ic.finishComposingText()
             else ic.setComposingText(qwertyBuffer.toString(), 1)
             refreshQwertySuggestions(qwertyBuffer.toString())
             return
         }
+        // QWERTY backspace-restore (plan/22 Step 2): a fresh auto-correct
+        // still at the cursor reverts to the literal as composing (counts
+        // as reject). Anything else falls through to plain char delete.
+        if (tryRestoreAuto()) return
         // Real text deletion: a commit inside the 5s window counts as a
         // reject of that word (SPEC §2 learning rule).
         maybeRejectLastCommit()
         ic.deleteSurroundingText(1, 0)
         // Deletion can also expire helpers: sweep, no timer thread.
         refreshSnippetStrip()
+    }
+
+    /**
+     * Fresh-field/fresh-view reset: autocorrect state never crosses fields
+     * or input views (a restore after a cursor move would corrupt text).
+     */
+    private fun clearQwertyAutoState() {
+        lastAuto = null
+        suppressAutoFor = null
+        lastQwerty = null
+        lastQwertyFor = null
+        lastSpaceBreak = false
+    }
+
+    /**
+     * Backspace-restore attempt: true when a restore was performed (the
+     * caller returns). Requires a fresh [lastAuto], empty buffers, and
+     * the committed span still at the cursor ([QwertyDecisions] verifies
+     * via text-before-cursor — a cursor move, timeout, or intervening
+     * commit clears [lastAuto] and takes the plain path). The restore
+     * records `reject(corrected)` and arms [suppressAutoFor] so Space
+     * does not immediately re-take the rejected correction; the second
+     * `⌫` then edits the literal normally.
+     */
+    private fun tryRestoreAuto(): Boolean {
+        val auto = lastAuto ?: return false
+        if (System.currentTimeMillis() - auto.ts > RESTORE_WINDOW_MS) {
+            lastAuto = null
+            return false
+        }
+        val ic = currentInputConnection ?: return false
+        val before = try {
+            ic.getTextBeforeCursor(auto.committed.length + 8, 0)?.toString().orEmpty()
+        } catch (_: Exception) {
+            return false
+        }
+        if (!QwertyDecisions.restoreMatches(auto.committed, before)) {
+            lastAuto = null
+            return false
+        }
+        return try {
+            ic.deleteSurroundingText(auto.committed.length, 0)
+            qwertyBuffer.clear()
+            qwertyBuffer.append(auto.literal)
+            ic.setComposingText(auto.literal, 1)
+            lastAuto = null
+            suppressAutoFor = auto.literal
+            refreshQwertySuggestions(auto.literal)
+            val p = predictor
+            if (p == null) {
+                reportGestureError("Reject dropped (engine loading): ${auto.corrected}")
+            } else {
+                val shown = lastShown
+                serviceScope.launch {
+                    try {
+                        p.rejectWithShown(auto.corrected, shown)
+                    } catch (e: Exception) {
+                        reportGestureError("Reject logging failed: ${e.message}")
+                    }
+                }
+            }
+            gestureLog.record("qwerty", "delete", "restore-literal", auto.literal)
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /** Records a reject when the user deletes within 5s of a commit. */
@@ -2028,6 +2250,16 @@ class KbInputMethodService : InputMethodService() {
          */
         const val REJECT_WINDOW_MS = 5_000L
 
+        /**
+         * Backspace-restore window (plan/22): [lastAuto] stays restorable
+         * this long after an auto-correct commit. Same 5s as
+         * [REJECT_WINDOW_MS] by design (one learned window, not two).
+         */
+        const val RESTORE_WINDOW_MS = 5_000L
+
+        /** Double-space period window (plan/22): space within this long after a word break. */
+        const val DOUBLE_SPACE_MS = 800L
+
         /** Undo availability after a fling-delete commit ([REJECT_WINDOW_MS]). */
         const val UNDO_WINDOW_MS = 5_000L
 
@@ -2081,4 +2313,36 @@ fun EditorInfo?.isEmailOrUri(): Boolean {
     val variation = inputType and (InputType.TYPE_MASK_CLASS or InputType.TYPE_MASK_VARIATION)
     return variation == (InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS) ||
         variation == (InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI)
+}
+
+/**
+ * QWERTY correction policy (plan/22 Step 3). Thresholds mirror the core
+ * ([AUTOCORRECT_THRESHOLD_DEFAULT] 1.0 et al — kept as literals here so
+ * this file compiles against the bridge without native constants).
+ * Settings surface belongs to plan/19; per-field safety is automatic.
+ */
+internal enum class CorrectionMode {
+    AGGRESSIVE,
+    STANDARD,
+    CONSERVATIVE,
+    SUGGEST_ONLY,
+    OFF
+}
+
+/**
+ * Pure QWERTY space/delete decisions (plan/22 Step 2): no Android deps,
+ * so the rules stay unit-testable without the framework.
+ */
+internal object QwertyDecisions {
+    /**
+     * Restore verification: the committed span must still sit at the
+     * cursor. A cursor move, timeout-expiry clear, or intervening commit
+     * fails this and takes the plain char-delete path instead.
+     */
+    fun restoreMatches(committed: String, textBeforeCursor: String): Boolean =
+        committed.isNotEmpty() && textBeforeCursor.endsWith(committed)
+
+    /** Double-space period: a word-break space within [windowMs] of the last one. */
+    fun isDoubleSpace(now: Long, lastSpaceTs: Long, lastBreak: Boolean, windowMs: Long): Boolean =
+        lastBreak && now - lastSpaceTs in 1..windowMs
 }
