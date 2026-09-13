@@ -715,6 +715,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_kbcore_checksum_method_predictor_reject_with_shown(
     ): Int
+    external fun uniffi_kbcore_checksum_method_predictor_roman_form(
+    ): Int
     external fun uniffi_kbcore_checksum_method_predictor_set_cat_enabled(
     ): Int
     external fun uniffi_kbcore_checksum_method_predictor_set_cat_layout(
@@ -801,6 +803,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_kbcore_fn_method_predictor_reject_with_shown(`ptr`: Long,`word`: RustBuffer.ByValue,`shown`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_kbcore_fn_method_predictor_roman_form(`ptr`: Long,`word`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_kbcore_fn_method_predictor_set_cat_enabled(`ptr`: Long,`cat`: RustBuffer.ByValue,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_kbcore_fn_method_predictor_set_cat_layout(`ptr`: Long,`cat`: RustBuffer.ByValue,`layoutId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -999,6 +1003,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_kbcore_checksum_method_predictor_reject_with_shown() and 0xFFFF) != 16678) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_kbcore_checksum_method_predictor_roman_form() and 0xFFFF) != 33926) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_kbcore_checksum_method_predictor_set_cat_enabled() and 0xFFFF) != 58866) {
@@ -1589,6 +1596,15 @@ public interface PredictorInterface {
      * HashMap op + session log + coalesced flush — no suggest-in-`Mutex`.
      */
     fun `rejectWithShown`(`word`: kotlin.String, `shown`: List<kotlin.String>)
+    
+    /**
+     * Roman commit form for `word` (plan/23 Step 4): the pack `tr`
+     * string, or `""` when the word is OOV or has no `tr` (UniFFI-safe
+     * `String`; empty is the explicit no-Roman signal, mirroring
+     * [`Self::placement`]). The IME's Roman-commit toggle commits this
+     * instead of Devanagari; the index never changes.
+     */
+    fun `romanForm`(`word`: kotlin.String): kotlin.String
     
     /**
      * Enable/disable a category tab at runtime (user-pack toggle,
@@ -2188,6 +2204,27 @@ open class Predictor: Disposable, AutoCloseable, PredictorInterface
 }
     }
     
+    
+
+    
+    /**
+     * Roman commit form for `word` (plan/23 Step 4): the pack `tr`
+     * string, or `""` when the word is OOV or has no `tr` (UniFFI-safe
+     * `String`; empty is the explicit no-Roman signal, mirroring
+     * [`Self::placement`]). The IME's Roman-commit toggle commits this
+     * instead of Devanagari; the index never changes.
+     */override fun `romanForm`(`word`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_kbcore_fn_method_predictor_roman_form(
+        it,
+        
+        FfiConverterString.lower(`word`),_status)
+}
+    }
+    )
+    }
     
 
     

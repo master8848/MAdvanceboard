@@ -2867,6 +2867,49 @@ impl DictionaryStack {
             format!("{} • freq {} • accepts {}", e.cat, e.freq, acc)
         })
     }
+
+    /// Highest-priority static row for `word` (case-insensitive), or
+    /// `None` when no pack holds it. Shared by the learn-path seq lookup
+    /// and the Roman-commit toggle — one word-resolution rule, never two.
+    fn pack_row(&self, word: &str) -> Option<&DictEntry> {
+        let norm = word.to_lowercase();
+        let mut best: Option<&DictEntry> = None;
+        for e in self.base.iter().chain(self.extensions.iter()) {
+            if e.word.to_lowercase() == norm && best.map(|b| e.priority > b.priority).unwrap_or(true)
+            {
+                best = Some(e);
+            }
+        }
+        best
+    }
+
+    /// Match seq for a pack-known `word` under `mapping` (plan/23 Step 3:
+    /// lookup, no inference): explicit `seq` verbatim, else the `tr`
+    /// primary, else the skeleton — the same precedence
+    /// [`DictEntry::from_parts`] bakes in at insert. `None` for true OOV
+    /// (the caller falls back to plain encoding; transliteration
+    /// inference stays future work).
+    pub fn pack_match_seq(&self, word: &str, mapping: &dyn KeyMapping) -> Option<String> {
+        let e = self.pack_row(word)?;
+        if e.explicit {
+            return Some(e.seq.clone());
+        }
+        let seq = mapping.encode_word(e.seq_source());
+        if seq.is_empty() {
+            None
+        } else {
+            Some(seq)
+        }
+    }
+
+    /// Roman commit form for `word` (plan/23 Step 4): the pack `tr` string
+    /// (e.g. `namaste` for `नमस्ते`) for Roman-output mode
+    /// (Nepglish/Hinglish-Latin). `None` for true OOV and rows without
+    /// `tr` — the caller commits Devanagari. Display/commit-form choice
+    /// only: the index never changes.
+    pub fn roman_form(&self, word: &str) -> Option<String> {
+        self.pack_row(word)?.tr.clone()
+    }
 }
 
 #[cfg(test)]
@@ -4329,6 +4372,48 @@ mod tests {
         assert_eq!(r.literal, "teh");
         assert!(r.corrections.is_empty());
         assert!(!r.confident);
+    }
+
+    // ---- Plan/23 multilingual V1 (core): user tr/alt columns are in
+    // pack.rs; here the learn-path tr lookup + Roman-commit surface. ----
+
+    #[test]
+    fn learn_path_uses_pack_match_seq_not_skeleton() {
+        // Plan/23 Step 3 (lookup, no inference): pack-known words resolve
+        // their match seq (the `tr` primary); true OOV keeps the encode.
+        let stack = ne_stack();
+        let reg = LayoutRegistry::with_builtins();
+        let t9 = reg.get_or_default("t9-9");
+        let tr_seq = stack.pack_match_seq("नमस्ते", t9).expect("pack-known");
+        assert_eq!(tr_seq, encode_word("namaste"));
+        assert_ne!(tr_seq, encode_word("नमस्ते"), "never the skeleton");
+        // alt rows resolve through their own seqs too (same word).
+        assert_eq!(stack.pack_match_seq("पानी", t9).expect("pack-known"), encode_word("pani"));
+        // True OOV: no lookup, caller falls back.
+        assert!(stack.pack_match_seq("नमस्तेX", t9).is_none());
+        // Explicit-seq rows stay verbatim under every layout.
+        let mut st = DictionaryStack::new(Vec::new());
+        st.add_entries(vec![DictEntry::explicit(
+            "❤️".to_string(),
+            "432".to_string(),
+            9000,
+            "emoji".to_string(),
+            "en".to_string(),
+            40,
+        )
+        .unwrap()]);
+        assert_eq!(st.pack_match_seq("❤️", t9).expect("explicit"), "432");
+    }
+
+    #[test]
+    fn roman_form_is_tr_or_nothing() {
+        // Plan/23 Step 4 surface: pack `tr` for Roman-output mode;
+        // nothing for OOV or tr-less rows (caller commits Devanagari).
+        let stack = ne_stack();
+        assert_eq!(stack.roman_form("नमस्ते").as_deref(), Some("namaste"));
+        assert_eq!(stack.roman_form("पानी").as_deref(), Some("pani"));
+        assert_eq!(stack.roman_form("नमस्तेX"), None);
+        assert_eq!(stack.roman_form("hello"), None);
     }
 }
 

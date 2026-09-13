@@ -142,6 +142,12 @@ interface Predictor : AutoCloseable {
     suspend fun setCatEnabled(cat: String, enabled: Boolean)
     suspend fun isCatEnabled(cat: String): Boolean
     suspend fun placement(word: String): String
+    /**
+     * Roman commit form for `word` (plan/23 Step 4): pack `tr` or `""`
+     * (explicit no-Roman signal). The IME's Roman-commit toggle commits
+     * this instead of Devanagari; the index never changes.
+     */
+    suspend fun romanForm(word: String): String
     suspend fun exportSession(): String
     suspend fun encode(word: String, layoutId: String): String
     suspend fun decode(prefix: String, layoutId: String, limit: Int): List<String>
@@ -295,6 +301,17 @@ class UniFfiPredictor internal constructor(
 
     override suspend fun placement(word: String): String =
         withContext(Dispatchers.Default) { real.placement(word) }
+
+    override suspend fun romanForm(word: String): String =
+        withContext(Dispatchers.Default) {
+            try {
+                real.romanForm(word)
+            } catch (e: UnsatisfiedLinkError) {
+                // Stale `.so` (pre-`roman_form` symbols): no Roman form —
+                // the IME commits Devanagari (documented plan/23 fallback).
+                ""
+            }
+        }
 
     override suspend fun exportSession(): String =
         withContext(Dispatchers.Default) { real.exportSession() }
@@ -511,6 +528,12 @@ class StubPredictor : Predictor {
 
     override suspend fun placement(word: String): String =
         degraded("placement has no in-memory equivalent")
+
+    override suspend fun romanForm(word: String): String =
+        withContext(Dispatchers.Default) {
+            // Degraded: no packs, no transliteration — Devanagari commit.
+            ""
+        }
 
     override suspend fun exportSession(): String =
         withContext(Dispatchers.Default) {

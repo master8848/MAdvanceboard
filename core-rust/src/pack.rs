@@ -206,7 +206,18 @@ pub fn validate_user_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Parse pasted/imported wordlist text: one `word [freq]` per line.
+/// Parse pasted/imported wordlist text: one `word [freq] [tr] [alt,…]`
+/// per line (plan/23 Step 2: the cheapest "other language" path —
+/// Hindi/other friends sideload WITH transliteration through the proven
+/// `tr`/`alt` machinery).
+///
+/// - `word`: the display form (Devanagari, Latin, …).
+/// - `freq`: 1-1M, default 100.
+/// - `tr`: optional Roman transliteration source — the primary search
+///   seq becomes `encode(tr)` while display stays `word` (exactly the
+///   Nepali-pack `w+tr` model).
+/// - `alt`: optional comma-separated extra Roman variants
+///   (`paani` next to `tr: pani`), each an additional match-any seq.
 /// Blank lines and `#` comment lines are skipped. Returns the rows on
 /// success, or the exact per-row errors on failure — never a partial
 /// silent drop. Every row is stamped `cat`/`lang` for the new category.
@@ -242,9 +253,47 @@ pub fn parse_user_wordlist(
                 }
             },
         };
+        // Optional `tr` + `alt,…` (plan/23): the Roman spellings the word
+        // is typed with. Both must encode non-empty (loud, like pack
+        // `validate`); a 5th token is trailing-text as before.
+        let tr: Option<String> = match parts.next() {
+            None => None,
+            Some(t) => {
+                if encode_word(t).is_empty() {
+                    errs.push(format!(
+                        "line {line_no} {w:?}: tr {t:?} encodes to empty seq (roman letters required)"
+                    ));
+                    continue;
+                }
+                Some(t.to_string())
+            }
+        };
+        let alt: Vec<String> = match parts.next() {
+            None => Vec::new(),
+            Some(a) => {
+                let mut variants = Vec::new();
+                let mut bad = false;
+                for v in a.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if encode_word(v).is_empty() {
+                        errs.push(format!(
+                            "line {line_no} {w:?}: alt variant {v:?} encodes to empty seq"
+                        ));
+                        bad = true;
+                        break;
+                    }
+                    variants.push(v.to_string());
+                }
+                if bad {
+                    continue;
+                }
+                variants.sort();
+                variants.dedup();
+                variants
+            }
+        };
         if parts.next().is_some() {
             errs.push(format!(
-                "line {line_no} {w:?}: expected `word [freq]`, trailing text rejected"
+                "line {line_no} {w:?}: expected `word [freq] [tr] [alt,…]`, trailing text rejected"
             ));
             continue;
         }
@@ -253,9 +302,14 @@ pub fn parse_user_wordlist(
             errs.push(format!("line {line_no} {w:?}: duplicate word"));
             continue;
         }
-        if encode_word(w).is_empty() {
+        // Primary seq source: `tr` when present (transliterated sideload),
+        // else the word itself (Devanagari words encode to their
+        // consonant skeleton — non-empty, so they pass; truly unencodable
+        // words still fail loudly).
+        let primary_source = tr.as_deref().unwrap_or(w);
+        if encode_word(primary_source).is_empty() {
             errs.push(format!(
-                "line {line_no} {w:?}: encodes to empty seq (latin letters/digits only in wordlists)"
+                "line {line_no} {w:?}: encodes to empty seq (latin letters/digits, or a `tr` transliteration)"
             ));
             continue;
         }
@@ -265,12 +319,12 @@ pub fn parse_user_wordlist(
             cat: Some(cat.to_string()),
             lang: Some(lang.to_string()),
             seq: None,
-            tr: None,
-            alt: Vec::new(),
+            tr,
+            alt,
         });
     }
     if words.is_empty() && errs.is_empty() {
-        errs.push("wordlist is empty: add one `word [freq]` per line".to_string());
+        errs.push("wordlist is empty: add one `word [freq] [tr] [alt,…]` per line".to_string());
     }
     if errs.is_empty() { Ok(words) } else { Err(errs) }
 }
@@ -436,7 +490,7 @@ mod tests {
 
     #[test]
     fn user_wordlist_bad_rows_fail_loudly_never_silently() {
-        let err = parse_user_wordlist("ava 9000\nava 100\nbob 0\n*\nbob 100 extra\n", "names", "en")
+        let err = parse_user_wordlist("ava 9000\nava 100\nbob 0\n*\nbob 100 x y z\n", "names", "en")
             .unwrap_err();
         assert_eq!(err.len(), 4, "one error per bad row, got {err:?}");
         assert!(err.iter().any(|e| e.contains("duplicate")), "{err:?}");
@@ -444,6 +498,45 @@ mod tests {
         assert!(err.iter().any(|e| e.contains("empty seq")), "{err:?}");
         assert!(err.iter().any(|e| e.contains("trailing text")), "{err:?}");
         assert!(parse_user_wordlist("", "names", "en").unwrap_err()[0].contains("empty"));
+    }
+
+    #[test]
+    fn user_wordlist_tr_alt_columns_sideload_transliteration() {
+        // Plan/23 Step 2: `word [freq] [tr] [alt,…]` — Hindi/other
+        // sideload WITH transliteration through the proven tr/alt model.
+        let words = parse_user_wordlist("पानी 7000 pani paani\nnamaste 9000\n", "hi", "hi").unwrap();
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].w, "पानी");
+        assert_eq!(words[0].freq, 7000);
+        assert_eq!(words[0].tr.as_deref(), Some("pani"));
+        assert_eq!(words[0].alt, vec!["paani".to_string()]);
+        assert_eq!(words[1].tr, None);
+        // Entries carry the tr primary + alt aliases (Roman digits match).
+        let pack = build_user_pack("hi", "Hindi", "पानी 7000 pani paani\n", "hi").unwrap();
+        let entries = pack.to_entries(50);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].seq, encode_word("pani"));
+        assert!(entries[0].aliases.contains(&encode_word("paani")));
+        // … and surface through suggest via Roman digits (sideload round-trip).
+        let mut stack = crate::stack::DictionaryStack::new(Vec::new());
+        stack.add_pack(&pack, 50);
+        let s = stack.suggest("", &encode_word("pani"), "hi", 5);
+        assert!(
+            s.iter().any(|c| c.word == "पानी"),
+            "sideloaded tr row must match Roman digits, got {:?}",
+            s.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+        let v = stack.suggest("", &encode_word("paani"), "hi", 5);
+        assert!(v.iter().any(|c| c.word == "पानी"));
+    }
+
+    #[test]
+    fn user_wordlist_bad_tr_alt_fail_loudly() {
+        // Empty-encoding tr / alt are loud per-row errors, never silent drops.
+        let err = parse_user_wordlist("w1 100 *\nw2 100 ok *\n", "names", "en").unwrap_err();
+        assert_eq!(err.len(), 2, "got {err:?}");
+        assert!(err[0].contains("tr"), "{err:?}");
+        assert!(err[1].contains("alt"), "{err:?}");
     }
 
     #[test]

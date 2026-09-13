@@ -274,6 +274,18 @@ impl Predictor {
             .unwrap_or_else(|e| panic!("Predictor::placement: lock poisoned: {e}"))
     }
 
+    /// Roman commit form for `word` (plan/23 Step 4): the pack `tr`
+    /// string, or `""` when the word is OOV or has no `tr` (UniFFI-safe
+    /// `String`; empty is the explicit no-Roman signal, mirroring
+    /// [`Self::placement`]). The IME's Roman-commit toggle commits this
+    /// instead of Devanagari; the index never changes.
+    pub fn roman_form(&self, word: String) -> String {
+        self.inner
+            .lock()
+            .map(|i| i.stack.roman_form(&word).unwrap_or_default())
+            .unwrap_or_else(|e| panic!("Predictor::roman_form: lock poisoned: {e}"))
+    }
+
     /// Current global default layout id.
     pub fn default_layout(&self) -> String {
         self.inner
@@ -370,7 +382,16 @@ impl Predictor {
             let (mapping, err) = i.layouts.resolve_report(cat);
             let mapping = mapping.clone();
             i.note_layout_error(err);
-            let seq = mapping.encode_word(&word);
+            // Plan/23 Step 3 (lookup, no inference): a pack-known word
+            // logs its pack match seq (the `tr` primary for Devanagari —
+            // `namaste`, never the `5685` skeleton), so session replay
+            // ranks through the same seq the suggest path matched. True
+            // OOV keeps the plain encode; transliteration inference for
+            // unseen words stays future work.
+            let seq = i
+                .stack
+                .pack_match_seq(&word, &mapping)
+                .unwrap_or_else(|| mapping.encode_word(&word));
             i.stack.personal.learn(&word, cat);
             i.session.log_accepted(&seq, "", &word, &shown);
             Self::flush_if_due_inner(&mut i);
@@ -640,7 +661,8 @@ impl Predictor {
 
     /// Register a user custom-category pack at runtime (names flow):
     /// `id` names the new category tab, `wordlist` is pasted/imported
-    /// `word [freq]` text (see [`crate::pack::parse_user_wordlist`]),
+    /// `word [freq] [tr] [alt,…]` text (see
+    /// [`crate::pack::parse_user_wordlist`]),
     /// `lang` stamps every row, `priority` must sit in `10-90` (plan/08).
     /// Behaves like a first-class category tab from here on: isolated
     /// ranking under its tab (custom-tab policy), personal-learn overlay
@@ -785,6 +807,54 @@ mod tests {
         assert_eq!(miss.literal, "zxqj");
         assert!(miss.corrections.is_empty());
         assert!(!miss.confident);
+    }
+
+    #[test]
+    fn learn_with_shown_logs_pack_match_seq() {
+        // Plan/23 Step 3: learning a pack-known Devanagari word logs the
+        // pack match seq (the `tr` primary), never the skeleton — session
+        // replay ranks through the seq suggest actually matched.
+        let p = Predictor::new("[]".to_string());
+        p.try_add_pack_json(
+            r#"{"id":"ne","title":"Nepali","version":"1.0.0",
+                "words":[{"w":"नमस्ते","tr":"namaste","freq":9000,"cat":"NE","lang":"ne"}]}"#,
+            10,
+        )
+        .unwrap();
+        p.learn_with_shown("नमस्ते".to_string(), "NE".to_string(), Vec::new());
+        let exported = p.export_session();
+        let tr_seq = crate::mapping::encode_word("namaste");
+        let skeleton = crate::mapping::encode_word("नमस्ते");
+        assert_ne!(tr_seq, skeleton);
+        assert!(
+            exported.contains(&format!("\"seq\":\"{tr_seq}\"")),
+            "session must log the tr seq, got {exported}"
+        );
+        assert!(
+            !exported.contains(&format!("\"seq\":\"{skeleton}\"")),
+            "session must not log the skeleton, got {exported}"
+        );
+        // True OOV keeps the plain encode.
+        p.learn_with_shown("नमस्तेX".to_string(), "NE".to_string(), Vec::new());
+        let exported2 = p.export_session();
+        let oov_seq = crate::mapping::encode_word("नमस्तेX");
+        assert!(exported2.contains(&format!("\"seq\":\"{oov_seq}\"")));
+    }
+
+    #[test]
+    fn roman_form_export_is_tr_or_empty() {
+        // Plan/23 Step 4 FFI: pack `tr` or `""` (never a fabricated form).
+        let p = Predictor::new("[]".to_string());
+        p.try_add_pack_json(
+            r#"{"id":"ne","title":"Nepali","version":"1.0.0",
+                "words":[{"w":"नमस्ते","tr":"namaste","freq":9000,"cat":"NE","lang":"ne"},
+                         {"w":"plain","freq":10,"cat":"EN"}]}"#,
+            10,
+        )
+        .unwrap();
+        assert_eq!(p.roman_form("नमस्ते".to_string()), "namaste");
+        assert_eq!(p.roman_form("plain".to_string()), "");
+        assert_eq!(p.roman_form("nope".to_string()), "");
     }
 
     #[test]
