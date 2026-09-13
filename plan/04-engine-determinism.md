@@ -5,6 +5,7 @@ User rule: feel a little slow is fine; suggestions must not change based on how 
 ## Invariants
 
 - Same `(dict set, ctx, digits, tab, layout, personal snapshot, now-hour)` → byte-identical `Vec<Suggestion>`. Slower devices do same work, just slower.
+- Snippet 2-min buffer (`12`) is part of the visible strip, so it is part of the key: `expires_at` uses the same 1h-quantized `now` (`12` lifecycle), keeping the tuple invariant intact.
 - Budget = fixed counts only: `MATCH_CAP=200 → HEAP_TOP=30 → return limit` (`SPEC.md:55`, `core-rust/src/stack.rs:364`). Never `Instant::now()`-gated early exit. Verified: no deadline exists today — keep it that way.
 - Scoring path single-threaded, no rayon. `partial_cmp(...).unwrap_or(Equal)` must never see NaN: inputs can't NaN today (`log10(≥1)`, `exp` bounded) — add `debug_assert!(!score.is_nan())` + golden-vector test. Keep tie-break `score → len → lexicographic → priority` (`core-rust/src/stack.rs:409`) — already deterministic, must be total.
 

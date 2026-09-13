@@ -29,11 +29,13 @@ fn corpus() -> DictionaryStack {
         )
         .expect("golden corpus must parse"),
     );
-    // Fixed personal snapshot (learn timestamps clamp to recency 1.0
-    // against the frozen NOW, so this is deterministic).
-    stack.personal.learn("hell", "EN");
-    stack.personal.learn("hell", "EN");
-    stack.personal.learn("help", "EN");
+    // Fixed personal snapshot at the frozen hour bucket (plan/04): wall
+    // clock never enters the harness, so goldens hold on any machine at
+    // any time. `learn_at` floors to the 1h bucket; bigram counts are
+    // exact, not time-dependent.
+    stack.personal.learn_at("hell", "EN", NOW);
+    stack.personal.learn_at("hell", "EN", NOW);
+    stack.personal.learn_at("help", "EN", NOW);
     stack.personal.record_bigram("the", "hello");
     stack
 }
@@ -188,4 +190,62 @@ fn seeded_fuzz_byte_identical_repeats() {
             );
         }
     }
+}
+
+/// Cross-instance byte-identity (plan/04 P0-1): two identically built
+/// stacks hold distinct `HashMap` `RandomState`s, so any freq-only
+/// truncate would pick different 200-sets. Rebuilding the corpus +
+/// personal snapshot from scratch must reproduce every query exactly.
+#[test]
+fn cross_instance_byte_identical() {
+    let reg = LayoutRegistry::with_builtins();
+    let queries = [
+        ("t9-9", "", "43556", "EN"),
+        ("t9-9", "the", "43556", "EN"),
+        ("t9-9", "", "267", "NE"),
+        ("t9-12", "", "2*2", "EN"),
+        ("t9-16", "", "396", "EN"),
+        ("t9-16", "", "00AA", "EN"),
+    ];
+    for (layout, ctx, digits, tab) in queries {
+        let mapping = reg.get_or_default(layout).clone();
+        let a = corpus().suggest_for_layout_at(ctx, digits, &mapping, tab, 5, NOW);
+        let b = corpus().suggest_for_layout_at(ctx, digits, &mapping, tab, 5, NOW);
+        assert_eq!(
+            canonical(&a),
+            canonical(&b),
+            "cross-instance diverged ({layout} {ctx:?} {digits:?} {tab})"
+        );
+    }
+}
+
+/// Clock-bucket stability (plan/04 P0-2): learns 40 min apart in the
+/// same hour score identically under the frozen quantized now, while the
+/// next hour bucket still decays (intended day-scale decay preserved).
+#[test]
+fn same_hour_learns_score_identically() {
+    use kbcore::DictionaryStack;
+    fn stack_learned_at(ts: i64) -> DictionaryStack {
+        let mut s = DictionaryStack::new(
+            DictionaryStack::load_base_json(r#"[{"w":"hello","freq":900,"cat":"EN"}]"#).unwrap(),
+        );
+        s.personal.learn_at("hello", "EN", ts);
+        s
+    }
+    let reg = LayoutRegistry::with_builtins();
+    let mapping = reg.get_or_default("t9-9").clone();
+    let hour = NOW;
+    let a = stack_learned_at(hour).suggest_for_layout_at("", "43556", &mapping, "EN", 5, hour);
+    let b =
+        stack_learned_at(hour + 2400).suggest_for_layout_at("", "43556", &mapping, "EN", 5, hour);
+    assert_eq!(
+        canonical(&a),
+        canonical(&b),
+        "same-hour accepts must score byte-identically"
+    );
+    // Sanity: the quantized stamps agree (the mechanism behind the above).
+    assert_eq!(
+        stack_learned_at(hour).personal.get("hello").unwrap().last_seen,
+        stack_learned_at(hour + 2400).personal.get("hello").unwrap().last_seen,
+    );
 }
