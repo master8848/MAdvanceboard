@@ -1,9 +1,10 @@
-//! `kbcore`: 9-key T9 predictive text engine core (no Android deps).
+//! `kbcore`: configurable predictive text engine core (layout-driven, t9-9 default; no Android deps).
 
 pub mod inflect;
 pub mod layout;
 pub mod mapping;
 pub mod pack;
+pub mod palette;
 pub mod personal;
 pub mod predictor;
 pub mod rank;
