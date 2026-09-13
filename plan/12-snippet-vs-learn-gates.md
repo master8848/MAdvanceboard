@@ -73,8 +73,6 @@ Truth table:
 - Enter incognito mid-snippet → buffer wiped, history hidden, dark strip.
 - Password field → neither gate fires, no clipboard capture (`11:3`).
 
-## Open (needs owner call later)
+## Decision (frozen 2026-09-13)
 
-- Should `snippetNow` also require `tab in (js,rust,html,math)` strictly, or
-  allow EN/NE `don't → don't {` style? Default: allow everywhere except
-  `numbers` — simpler, one exclusion.
+`snippetNow` allows everywhere except `numbers` — simpler, one exclusion. The `tab in (js,rust,html,math)`-strict alternative is rejected: no second gate to maintain, negligible cost.
