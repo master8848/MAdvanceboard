@@ -39,8 +39,18 @@ val SUPPORTED_LAYOUT_IDS = listOf("t9-9", "t9-12", "t9-16")
 /** Minimum touch target for every pad key (48dp accessibility floor). */
 const val MIN_KEY_TARGET_DP = 48
 
-/** Inner padding of the pad grid (dp). */
-const val PAD_PADDING_DP = 16
+/** Compact fixed key height (Gboard-style, 48–52dp band). */
+const val KEY_HEIGHT_DP = 50
+
+/** Gaps between keys (dp) — tight Gboard-style grid. */
+const val KEY_H_GAP_DP = 3
+const val KEY_V_GAP_DP = 3
+
+/** Inner padding of the pad grid (dp) — compact, was 16. */
+const val PAD_PADDING_DP = 4
+
+/** Bottom margin above the navigation bar (dp, added to system inset). */
+const val PAD_BOTTOM_MARGIN_DP = 4
 
 /** Key roles understood by [PadView]; unknown roles fall back to `text`. */
 object PadRoles {
