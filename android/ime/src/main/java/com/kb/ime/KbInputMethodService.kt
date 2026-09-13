@@ -824,15 +824,26 @@ class KbInputMethodService : InputMethodService() {
         }
     }
 
-    /** Space key (t9-12 `0`, t9-16 `0`/`wx␣`): accept top candidate, else space. */
+    /**
+     * Space key (t9-12 `0`, t9-16 `0`/`wx␣`): T9 commits strip #1 while
+     * composing (plan/18: NEVER bare `" "` while `seq` is non-empty — an
+     * empty strip only means the engine is loading, so keep composing and
+     * re-query). QWERTY composing delegates to [onQwertySpace] (plan/01:
+     * one space path with confidence handling). Bare space only when both
+     * buffers are empty (word break).
+     */
     internal fun onPadSpace() {
-        val top = liveCandidates.firstOrNull()
-        if (seq.isNotEmpty() && top != null) {
-            commitCandidate(top)
+        if (qwertyFallback || qwertyBuffer.isNotEmpty()) {
+            onQwertySpace("pad-space")
             return
         }
-        if (qwertyBuffer.isNotEmpty()) {
-            commitCandidate(qwertyBuffer.toString())
+        val top = liveCandidates.firstOrNull()
+        if (seq.isNotEmpty()) {
+            if (top != null) {
+                commitCandidate(top)
+            } else {
+                refreshSuggestions(seq.toString())
+            }
             return
         }
         seq.clear()
@@ -1058,6 +1069,17 @@ class KbInputMethodService : InputMethodService() {
             )
             lastShown = result.map { it.word }
             liveCandidates = result.map { it.word }
+            // T9 composing preview (plan/18): the field shows the top
+            // candidate, never raw digits. Only while the snapshot is
+            // still current (a newer keystroke owns the field then).
+            if (!qwertyFallback && seq.toString() == snapshot) {
+                result.firstOrNull()?.let { top ->
+                    try {
+                        currentInputConnection?.setComposingText(top.word, 1)
+                    } catch (_: Exception) {
+                    }
+                }
+            }
         }
     }
 
