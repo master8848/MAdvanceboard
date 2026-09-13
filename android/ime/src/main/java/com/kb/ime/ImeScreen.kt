@@ -4,10 +4,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -58,11 +60,12 @@ data class PlacementState(
  * [candidates] are live results fed by the host service from
  * Predictor.suggest (shared T9/QWERTY path) — never hardcoded here.
  *
- * Zero layout chrome by design (UX): the 9/12/16 pad-size toggle lives ONLY
- * in Settings → Layout (global default + per-tab overrides via
- * [LayoutStore]); the pad offers no layout switcher. [onOpenSettings]
- * deep-links there (⚙ key in the strip row) so a layout change is one tap
- * away without cluttering the pad. The persisted override path itself
+ * Zero layout chrome by design (UX): layout lives ONLY in the ⚙
+ * quick-sheet (current tab only, [QuickSheet]) + Settings → Dictionaries
+ * (full editor, [DictStackOrder]); the pad offers no layout switcher.
+ * [onOpenSettings] deep-links to full Settings (used by the sheet's
+ * Details button) so a full edit is one tap away without cluttering the
+ * pad. The persisted override path itself
  * ([LayoutStore.setCatLayout], applied by the host on tab switch / field
  * start) is untouched by this screen.
  *
@@ -89,8 +92,18 @@ fun ImeScreen(
     onCategoryChanged: (String) -> Unit = {},
     /** Strip swipe-down (mode toggle); the host flips the same FAB state. */
     onToggleMode: () -> Unit = {},
-    /** ⚙ key: host deep-links to Settings → Layout (zero layout chrome on the pad). */
+    /** ⚙ key: host opens the quick-sheet ([QuickSheet], current tab only). */
     onOpenSettings: () -> Unit = {},
+    /**
+     * ⚙ sheet entry (plan/19 step 2): defaults to [onOpenSettings] so older
+     * hosts keep working; the service opens the current-tab [QuickSheet].
+     */
+    onOpenQuickSheet: () -> Unit = onOpenSettings,
+    /**
+     * 🙂 toolbar entry (plan/24 §5): the service opens the visual
+     * [EmojiPickerSheet]; the emoji tab itself stays for keyword search.
+     */
+    onOpenEmojiPicker: () -> Unit = {},
     /** Long-press on a tab: host opens the [PlacementState] popup. */
     onTabLongPress: (String) -> Unit = {},
     /** Placement popup (null = hidden) + its actions. */
@@ -135,10 +148,42 @@ fun ImeScreen(
     onClipboardDelete: (ClipboardItem) -> Unit = {},
     onClipboardClearUnpinned: () -> Unit = {},
     onClipboardClearAll: () -> Unit = {},
+    /**
+     * Slim toolbar (above the strip): undo deletes the last word via the
+     * host word-boundary path; redo re-commits the last toolbar-deleted
+     * word (disabled when [toolbarRedoAvailable] is false — single-level,
+     * cleared by fresh commits). Symbols opens the generic sheet.
+     */
+    onToolbarUndo: () -> Unit = {},
+    onToolbarRedo: () -> Unit = {},
+    toolbarRedoAvailable: Boolean = false,
+    onToolbarSymbols: () -> Unit = {},
     /** Explicit error/status line (gesture failures surface here, never silent). */
     statusLine: String? = null,
     /** Sink for overlay prefs failures (coach/footer), shown via [statusLine]. */
-    onError: (String) -> Unit = {}
+    onError: (String) -> Unit = {},
+    /**
+     * Quick-sheet (plan/19 step 2, plan/20 step 3): null = hidden. Edits
+     * the current tab only; "Details" jumps to the Dictionaries editor.
+     */
+    quickSheet: QuickSheetState? = null,
+    onQuickLayoutPick: (String) -> Unit = {},
+    onQuickToggleTab: (Boolean) -> Unit = {},
+    onQuickUndo: () -> Unit = {},
+    onQuickToggleIncognito: () -> Unit = {},
+    onQuickOpenClipboard: () -> Unit = {},
+    onQuickOpenDictionaries: () -> Unit = {},
+    onQuickDismiss: () -> Unit = {},
+    /**
+     * Emoji picker (plan/24 §5): grid + recents + search. [emojiGlyphs]
+     * come from the host (installed emoji pack); picks commit via
+     * [onEmojiPick] (the host also records the recent).
+     */
+    emojiPickerVisible: Boolean = false,
+    emojiGlyphs: List<String> = emptyList(),
+    emojiRecents: List<String> = emptyList(),
+    onEmojiPick: (String) -> Unit = {},
+    onEmojiDismiss: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var selectedTab by remember(categories) {
@@ -155,6 +200,10 @@ fun ImeScreen(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            // Phone-dependent bottom margin: the system navigation-bar inset
+            // plus a 4dp floor, so gesture-nav bars never overlap the pad.
+            .navigationBarsPadding()
+            .padding(bottom = 4.dp)
             .background(if (incognito) DarkIncognito else Color.Transparent)
     ) {
         if (incognito && incognitoBannerVisible) {
@@ -176,6 +225,21 @@ fun ImeScreen(
                 onExpandAll()
             }
         )
+        SlimToolbar(
+            onOverflow = {
+                expanded = true
+                onExpandAll()
+            },
+            onEmoji = onOpenEmojiPicker,
+            onClipboard = onToggleClipboard,
+            onToggleIncognito = onToggleIncognito,
+            onUndo = onToolbarUndo,
+            onRedo = onToolbarRedo,
+            onSymbols = onToolbarSymbols,
+            clipboardActive = clipboardVisible,
+            incognito = incognito,
+            redoAvailable = toolbarRedoAvailable
+        )
         Row(modifier = Modifier.fillMaxWidth()) {
             SuggestionStrip(
                 candidates = candidates,
@@ -189,26 +253,34 @@ fun ImeScreen(
                 onFling = onFling,
                 modifier = Modifier.weight(1f)
             )
-            // QWERTY FAB: button-first toggle (plan 01) + strip swipe-down
-            // duplicate ([classifyModeSwitch]). No single-finger Pad
-            // gesture toggles this (pad axes are all commit paths).
-            TextButton(onClick = onToggleQwerty) {
-                Text(if (qwertyActive) "9-KEY" else "QWERTY")
+            // Keyboard-icon toggle (plan 01) + strip swipe-down
+            // duplicate ([classifyModeSwitch]). 48dp minimum target; the
+            // glyph (⌨) replaces the old "QWERTY"/"9-KEY" text label — no
+            // single-finger Pad gesture toggles this (pad axes are all
+            // commit paths).
+            TextButton(
+                onClick = onToggleQwerty,
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .widthIn(min = 48.dp)
+            ) {
+                val kbDark = ThemeStore.isDarkEffective(context)
+                Text(
+                    text = "⌨",
+                    color = if (qwertyActive) MaterialTheme.colorScheme.primary
+                    else if (kbDark) Color(KbDarkMuted.toInt())
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
-            // Mask-key manual incognito toggle (plan/11 §2): bracketed when
-            // active. Clipboard toggle beside it (hidden while incognito —
-            // the host empties the list AND refuses to open the panel).
-            TextButton(onClick = onToggleIncognito) {
-                Text(if (incognito) "[🎭]" else "🎭")
-            }
-            if (!incognito) {
-                TextButton(onClick = onToggleClipboard) {
-                    Text(if (clipboardVisible) "[📋]" else "📋")
-                }
-            }
-            // Layout lives in Settings → Layout (global + per-tab); the pad
-            // keeps zero layout chrome, so this gear is the only path.
-            TextButton(onClick = onOpenSettings) {
+            // Layout lives in the ⚙ quick-sheet (current tab only) +
+            // Settings → Dictionaries (full editor); the pad keeps zero
+            // layout chrome, so this gear is the only path.
+            // 🎭/📋 moved to SlimToolbar above to declutter this row.
+            TextButton(
+                onClick = onOpenQuickSheet,
+                modifier = Modifier.heightIn(max = 36.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+            ) {
                 Text("⚙")
             }
         }
@@ -232,7 +304,7 @@ fun ImeScreen(
             Text(
                 text = "Delete $deletePreviewWords word(s) — release to commit, slide back to shrink",
                 style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
             )
         }
         if (undoAvailable) {
@@ -255,7 +327,7 @@ fun ImeScreen(
                 text = statusLine,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
             )
         }
         if (footerVisible) {
@@ -267,7 +339,7 @@ fun ImeScreen(
                     text = "← del · ↑ space · → accept",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                 )
                 TextButton(onClick = {
                     try {
@@ -296,6 +368,26 @@ fun ImeScreen(
                 onMoveDown = onPlacementMoveDown,
                 onToggle = onPlacementToggle,
                 onDismiss = onPlacementDismiss
+            )
+        }
+        if (quickSheet != null) {
+            QuickSheet(
+                state = quickSheet,
+                onLayoutPick = onQuickLayoutPick,
+                onToggleTab = onQuickToggleTab,
+                onUndo = onQuickUndo,
+                onToggleIncognito = onQuickToggleIncognito,
+                onOpenClipboard = onQuickOpenClipboard,
+                onOpenDictionaries = onQuickOpenDictionaries,
+                onDismiss = onQuickDismiss
+            )
+        }
+        if (emojiPickerVisible) {
+            EmojiPickerSheet(
+                glyphs = emojiGlyphs,
+                recents = emojiRecents,
+                onPick = onEmojiPick,
+                onDismiss = onEmojiDismiss
             )
         }
         if (symbolsOptions.isNotEmpty()) {
@@ -426,7 +518,7 @@ fun PlacementPopup(
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                // Engine id stays internal; humans see "General".
+                // Engine id stays internal; humans see the badge (E, ने, …).
                 text = "Placement — ${CategoryLabels.label(state.tab)}",
                 style = MaterialTheme.typography.titleSmall
             )
@@ -503,9 +595,9 @@ fun GestureCoach(onSkip: () -> Unit, onDone: () -> Unit) {
         "T9 typing: tap each digit key ONCE per letter (e.g. 4-3-5-5-6 " +
             "suggests \"hello\"). This is NOT multitap — never press " +
             "repeatedly, never wait; the strip guesses the word.",
-        "Prefer full keys? Tap QWERTY (top row) for the full keyboard, " +
-            "9-KEY to come back — or swipe DOWN on the suggestion strip.",
-        "Swipe ←/→ on the category tabs (General, NE, …) to switch " +
+        "Prefer full keys? Tap ⌨ (top row) for the full keyboard, " +
+            "⌨ again to come back — or swipe DOWN on the suggestion strip.",
+        "Swipe ←/→ on the category tabs (E, ने, …) to switch " +
             "dictionaries. Long-press a tab for its pack info."
     )
     Card(
@@ -564,15 +656,17 @@ fun ExpandAllList(
                 Row {
                     TextButton(
                         enabled = page > 0,
-                        onClick = { page-- }
+                        onClick = { page-- },
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .widthIn(min = 48.dp)
                     ) { Text("‹ Prev") }
-                    Text(
-                        text = "${page + 1}/$pageCount",
-                        modifier = Modifier.padding(vertical = 12.dp)
-                    )
                     TextButton(
                         enabled = page < pageCount - 1,
-                        onClick = { page++ }
+                        onClick = { page++ },
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .widthIn(min = 48.dp)
                     ) { Text("Next ›") }
                 }
             }
