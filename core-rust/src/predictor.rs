@@ -7,7 +7,7 @@ use crate::layout::{KeyMapping, LayoutRegistry, DEFAULT_LAYOUT_ID};
 use crate::pack::{load_pack_str, PackFile};
 use crate::personal::now_quantized;
 use crate::session::SessionLogger;
-use crate::stack::{DictionaryStack, Suggestion};
+use crate::stack::{DictionaryStack, QwertyResult, Suggestion};
 use crate::store::{FlushStats, Store};
 
 struct Inner {
@@ -136,6 +136,46 @@ impl Predictor {
                     .suggest_for_layout_policy_at(&ctx, &digits, &mapping, tab, limit as usize, now)
             })
             .unwrap_or_else(|e| panic!("Predictor::suggest_for_cat: lock poisoned: {e}"))
+    }
+
+    /// QWERTY suggest in ONE FFI call (plan/22 Step 2: one `suggest` per
+    /// keystroke — the old `encode` + `suggest` two-call path is kept for
+    /// compat but the IME no longer uses it). `raw` is the verbatim
+    /// buffer; the typo model expands letter-graph variants pre-encode
+    /// inside the lock. `autocorrect_threshold` is the confidence delta
+    /// (`S(top) − S(literal)`); pass
+    /// [`crate::stack::AUTOCORRECT_THRESHOLD_DEFAULT`] (1.0),
+    /// `_AGGRESSIVE` (0.5), `_CONSERVATIVE` (2.0), or `INFINITY` for
+    /// Suggest-only. Unknown/empty layout ids resolve loudly (see
+    /// [`Self::take_last_layout_error`]).
+    pub fn suggest_qwerty(
+        &self,
+        raw: String,
+        ctx: String,
+        active_tab: String,
+        layout_id: String,
+        limit: u32,
+        autocorrect_threshold: f64,
+    ) -> QwertyResult {
+        let tab = if active_tab.is_empty() { "EN" } else { &active_tab };
+        let now = now_quantized();
+        self.inner
+            .lock()
+            .map(|mut i| {
+                let (mapping, err) = i.layouts.get_or_default_report(&layout_id);
+                let mapping = mapping.clone();
+                i.note_layout_error(err);
+                i.stack.suggest_qwerty_at(
+                    &raw,
+                    &ctx,
+                    tab,
+                    limit as usize,
+                    &mapping,
+                    now,
+                    autocorrect_threshold,
+                )
+            })
+            .unwrap_or_else(|e| panic!("Predictor::suggest_qwerty: lock poisoned: {e}"))
     }
 
     /// Encode a word under a layout (default `t9-9`; fallbacks are loud,
@@ -702,6 +742,49 @@ mod tests {
         p.learn("hello".to_string(), "EN".to_string());
         let exported = p.export_session();
         assert!(exported.contains("hello"));
+    }
+
+    #[test]
+    fn suggest_qwerty_literal_correction_confidence() {
+        // Plan/22 FFI surface: one call carries literal + corrections +
+        // confidence. `teh` corrects to `the`; the exact word stays
+        // literal; misses stay literal-only.
+        let p = Predictor::new(
+            r#"[{"w":"the","freq":9000,"cat":"EN"},{"w":"then","freq":100,"cat":"EN"}]"#.to_string(),
+        );
+        let r = p.suggest_qwerty(
+            "teh".to_string(),
+            "".to_string(),
+            "EN".to_string(),
+            "t9-9".to_string(),
+            5,
+            crate::stack::AUTOCORRECT_THRESHOLD_DEFAULT,
+        );
+        assert_eq!(r.literal, "teh");
+        assert_eq!(r.corrections[0].word, "the");
+        assert!(r.corrections[0].is_correction);
+        assert!(r.confident);
+        let exact = p.suggest_qwerty(
+            "the".to_string(),
+            "".to_string(),
+            "EN".to_string(),
+            "t9-9".to_string(),
+            5,
+            crate::stack::AUTOCORRECT_THRESHOLD_DEFAULT,
+        );
+        assert_eq!(exact.literal, "the");
+        assert!(!exact.confident);
+        let miss = p.suggest_qwerty(
+            "zxqj".to_string(),
+            "".to_string(),
+            "EN".to_string(),
+            "t9-9".to_string(),
+            5,
+            crate::stack::AUTOCORRECT_THRESHOLD_DEFAULT,
+        );
+        assert_eq!(miss.literal, "zxqj");
+        assert!(miss.corrections.is_empty());
+        assert!(!miss.confident);
     }
 
     #[test]

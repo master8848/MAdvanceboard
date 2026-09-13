@@ -725,6 +725,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_kbcore_checksum_method_predictor_suggest_for_cat(
     ): Int
+    external fun uniffi_kbcore_checksum_method_predictor_suggest_qwerty(
+    ): Int
     external fun uniffi_kbcore_checksum_method_predictor_suggest_with_layout(
     ): Int
     external fun uniffi_kbcore_checksum_method_predictor_take_last_layout_error(
@@ -808,6 +810,8 @@ internal object UniffiLib {
     external fun uniffi_kbcore_fn_method_predictor_suggest(`ptr`: Long,`ctx`: RustBuffer.ByValue,`digits`: RustBuffer.ByValue,`activeTab`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_kbcore_fn_method_predictor_suggest_for_cat(`ptr`: Long,`ctx`: RustBuffer.ByValue,`digits`: RustBuffer.ByValue,`activeTab`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_kbcore_fn_method_predictor_suggest_qwerty(`ptr`: Long,`raw`: RustBuffer.ByValue,`ctx`: RustBuffer.ByValue,`activeTab`: RustBuffer.ByValue,`layoutId`: RustBuffer.ByValue,`limit`: Int,`autocorrectThreshold`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_kbcore_fn_method_predictor_suggest_with_layout(`ptr`: Long,`ctx`: RustBuffer.ByValue,`digits`: RustBuffer.ByValue,`layoutId`: RustBuffer.ByValue,`activeTab`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1010,6 +1014,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_kbcore_checksum_method_predictor_suggest_for_cat() and 0xFFFF) != 8702) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_kbcore_checksum_method_predictor_suggest_qwerty() and 0xFFFF) != 11942) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_kbcore_checksum_method_predictor_suggest_with_layout() and 0xFFFF) != 53889) {
@@ -1624,6 +1631,20 @@ public interface PredictorInterface {
      * per-tab policy (neighbor OFF, every tab hard-scoped).
      */
     fun `suggestForCat`(`ctx`: kotlin.String, `digits`: kotlin.String, `activeTab`: kotlin.String, `limit`: kotlin.UInt): List<Suggestion>
+    
+    /**
+     * QWERTY suggest in ONE FFI call (plan/22 Step 2: one `suggest` per
+     * keystroke — the old `encode` + `suggest` two-call path is kept for
+     * compat but the IME no longer uses it). `raw` is the verbatim
+     * buffer; the typo model expands letter-graph variants pre-encode
+     * inside the lock. `autocorrect_threshold` is the confidence delta
+     * (`S(top) − S(literal)`); pass
+     * [`crate::stack::AUTOCORRECT_THRESHOLD_DEFAULT`] (1.0),
+     * `_AGGRESSIVE` (0.5), `_CONSERVATIVE` (2.0), or `INFINITY` for
+     * Suggest-only. Unknown/empty layout ids resolve loudly (see
+     * [`Self::take_last_layout_error`]).
+     */
+    fun `suggestQwerty`(`raw`: kotlin.String, `ctx`: kotlin.String, `activeTab`: kotlin.String, `layoutId`: kotlin.String, `limit`: kotlin.UInt, `autocorrectThreshold`: kotlin.Double): QwertyResult
     
     /**
      * Suggest under an explicit layout. Unknown/empty ids still resolve
@@ -2278,6 +2299,37 @@ open class Predictor: Disposable, AutoCloseable, PredictorInterface
 
     
     /**
+     * QWERTY suggest in ONE FFI call (plan/22 Step 2: one `suggest` per
+     * keystroke — the old `encode` + `suggest` two-call path is kept for
+     * compat but the IME no longer uses it). `raw` is the verbatim
+     * buffer; the typo model expands letter-graph variants pre-encode
+     * inside the lock. `autocorrect_threshold` is the confidence delta
+     * (`S(top) − S(literal)`); pass
+     * [`crate::stack::AUTOCORRECT_THRESHOLD_DEFAULT`] (1.0),
+     * `_AGGRESSIVE` (0.5), `_CONSERVATIVE` (2.0), or `INFINITY` for
+     * Suggest-only. Unknown/empty layout ids resolve loudly (see
+     * [`Self::take_last_layout_error`]).
+     */override fun `suggestQwerty`(`raw`: kotlin.String, `ctx`: kotlin.String, `activeTab`: kotlin.String, `layoutId`: kotlin.String, `limit`: kotlin.UInt, `autocorrectThreshold`: kotlin.Double): QwertyResult {
+            return FfiConverterTypeQwertyResult.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_kbcore_fn_method_predictor_suggest_qwerty(
+        it,
+        
+        FfiConverterString.lower(`raw`),
+        FfiConverterString.lower(`ctx`),
+        FfiConverterString.lower(`activeTab`),
+        FfiConverterString.lower(`layoutId`),
+        FfiConverterUInt.lower(`limit`),
+        FfiConverterDouble.lower(`autocorrectThreshold`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Suggest under an explicit layout. Unknown/empty ids still resolve
      * to `t9-9` (no call-site breakage) but the fallback is LOUD: the
      * diagnostic is logged and retrievable via
@@ -2376,6 +2428,118 @@ public object FfiConverterTypePredictor: FfiConverter<Predictor, Long> {
 
 
 /**
+ * One QWERTY correction/completion (UniFFI record): `is_correction`
+ * distinguishes typo fixes (center-bold slot) from prefix completions
+ * (right slot). `score` runs the SAME weights as T9 (freq + personal +
+ * bigram + recency + cat + keyfit − reject) — only the match set differs
+ * (letter-graph pre-encode, never T9 digit-neighbors).
+ */
+data class QwertyCorrection (
+    var `word`: kotlin.String
+    , 
+    var `score`: kotlin.Double
+    , 
+    var `seq`: kotlin.String
+    , 
+    var `cat`: kotlin.String
+    , 
+    var `isCorrection`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeQwertyCorrection: FfiConverterRustBuffer<QwertyCorrection> {
+    override fun read(buf: ByteBuffer): QwertyCorrection {
+        return QwertyCorrection(
+            FfiConverterString.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: QwertyCorrection) = (
+            FfiConverterString.allocationSize(value.`word`) +
+            FfiConverterDouble.allocationSize(value.`score`) +
+            FfiConverterString.allocationSize(value.`seq`) +
+            FfiConverterString.allocationSize(value.`cat`) +
+            FfiConverterBoolean.allocationSize(value.`isCorrection`)
+    )
+
+    override fun write(value: QwertyCorrection, buf: ByteBuffer) {
+            FfiConverterString.write(value.`word`, buf)
+            FfiConverterDouble.write(value.`score`, buf)
+            FfiConverterString.write(value.`seq`, buf)
+            FfiConverterString.write(value.`cat`, buf)
+            FfiConverterBoolean.write(value.`isCorrection`, buf)
+    }
+}
+
+
+
+/**
+ * QWERTY suggest output (UniFFI record): `literal` is ALWAYS the verbatim
+ * raw text (AOSP: never missing); `corrections` are scored dict words;
+ * `confident` gates Space-takes-correction (`S(top) − S(literal) >
+ * threshold`). QWERTY and T9 ranking never blend (MASTER rule 5): this
+ * path never applies [`SHORT_EXACT_BOOST`], never reads the digit-neighbor
+ * policy — the frozen T9 arms are untouched by construction (no shared
+ * mutable state, separate entry point).
+ */
+data class QwertyResult (
+    var `literal`: kotlin.String
+    , 
+    var `corrections`: List<QwertyCorrection>
+    , 
+    var `confident`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeQwertyResult: FfiConverterRustBuffer<QwertyResult> {
+    override fun read(buf: ByteBuffer): QwertyResult {
+        return QwertyResult(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceTypeQwertyCorrection.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: QwertyResult) = (
+            FfiConverterString.allocationSize(value.`literal`) +
+            FfiConverterSequenceTypeQwertyCorrection.allocationSize(value.`corrections`) +
+            FfiConverterBoolean.allocationSize(value.`confident`)
+    )
+
+    override fun write(value: QwertyResult, buf: ByteBuffer) {
+            FfiConverterString.write(value.`literal`, buf)
+            FfiConverterSequenceTypeQwertyCorrection.write(value.`corrections`, buf)
+            FfiConverterBoolean.write(value.`confident`, buf)
+    }
+}
+
+
+
+/**
  * Scored candidate returned to the UI / UniFFI.
  */
 data class Suggestion (
@@ -2456,6 +2620,34 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeQwertyCorrection: FfiConverterRustBuffer<List<QwertyCorrection>> {
+    override fun read(buf: ByteBuffer): List<QwertyCorrection> {
+        val len = buf.getInt()
+        return List<QwertyCorrection>(len) {
+            FfiConverterTypeQwertyCorrection.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<QwertyCorrection>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeQwertyCorrection.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<QwertyCorrection>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeQwertyCorrection.write(it, buf)
         }
     }
 }

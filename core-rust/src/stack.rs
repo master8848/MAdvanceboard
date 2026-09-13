@@ -29,7 +29,7 @@ use crate::layout::{KeyMapping, LayoutRegistry, DEFAULT_LAYOUT_ID};
 use crate::mapping::{encode_word, is_one_edit_neighbor};
 use crate::pack::PackFile;
 use crate::personal::{now_quantized, PersonalDict};
-use crate::rank::{base_term, dequantize_base, quantize_base, score_candidate_with_base, RankInput, RankWeights};
+use crate::rank::{base_term, dequantize_base, quantize_base, score_candidate, score_candidate_with_base, RankInput, RankWeights};
 
 /// Prefix-result cache entry: `(layout_id, digits, fallback_version)`
 /// -> exact+prefix `(row, keyfit-tag)` sets (`1` = exact, `0` = prefix).
@@ -742,6 +742,227 @@ pub struct NextSuggestion {
     pub count: u64,
     pub cat: String,
 }
+
+/// Default autocorrect confidence delta (plan/22 Step 1): `S(top) −
+/// S(literal_as_OOV)` must exceed this for Space to take the correction.
+/// Separate from `hide_threshold` (display) — never conflated. Settings
+/// surface (plan/19): Aggressive 0.5 / Conservative 2.0 / Suggest-only
+/// `INFINITY` (corrections shown, Space keeps the literal) / Off (limit 0,
+/// literal only — no FFI change, the IME just stops asking).
+pub const AUTOCORRECT_THRESHOLD_DEFAULT: f64 = 1.0;
+/// See [`AUTOCORRECT_THRESHOLD_DEFAULT`].
+pub const AUTOCORRECT_THRESHOLD_AGGRESSIVE: f64 = 0.5;
+/// See [`AUTOCORRECT_THRESHOLD_DEFAULT`].
+pub const AUTOCORRECT_THRESHOLD_CONSERVATIVE: f64 = 2.0;
+
+/// Fixed-count variant budget (plan/22 Step 1): variant seqs are sorted +
+/// truncated to this many, so long QWERTY buffers cost a bounded number of
+/// posting lookups, never wall-clock work.
+pub const QWERTY_VARIANT_CAP: usize = 128;
+
+/// QWERTY key coordinates in doubled staggered units (`x = 2*col + row`,
+/// `y = 2*row`): neighbors satisfy `dx²+dy² <= 8`. Matches the physical
+/// board (`q/w`, `o/p`, `a/s` adjacent; `q/s`, `m/l` not).
+fn qwerty_pos(c: char) -> Option<(i32, i32)> {
+    let (row, col) = match c {
+        'q' | 'w' | 'e' | 'r' | 't' | 'y' | 'u' | 'i' | 'o' | 'p' => {
+            (0, "qwertyuiop".find(c).unwrap() as i32)
+        }
+        'a' | 's' | 'd' | 'f' | 'g' | 'h' | 'j' | 'k' | 'l' => {
+            (1, "asdfghjkl".find(c).unwrap() as i32)
+        }
+        'z' | 'x' | 'c' | 'v' | 'b' | 'n' | 'm' => (2, "zxcvbnm".find(c).unwrap() as i32),
+        _ => return None,
+    };
+    Some((2 * col + row, 2 * row))
+}
+
+/// Distinct QWERTY-adjacent letters of `c` (sorted, never contains `c`).
+/// Empty for non-letters. Backs the typo model AND the
+/// correction/completion classifier, so generation and classification can
+/// never disagree on the graph.
+fn qwerty_neighbors(c: char) -> Vec<char> {
+    let Some((x, y)) = qwerty_pos(c) else {
+        return Vec::new();
+    };
+    let mut out: Vec<char> = ('a'..='z')
+        .filter(|&b| {
+            b != c
+                && qwerty_pos(b).is_some_and(|(bx, by)| {
+                    let (dx, dy) = (x - bx, y - by);
+                    dx * dx + dy * dy <= 8
+                })
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// True when the typo model may expand `raw`: alphabetic text (apostrophe
+/// and hyphen ride along for `don't`/`e-mail`, fixed in place — never
+/// substituted). Digits/punct/space take the literal + digit-seq union
+/// only, so Sym-taps through the QWERTY buffer never summon letter
+/// corrections.
+fn qwerty_variant_gate(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c == '\'' || c == '-')
+        && raw.chars().any(|c| c.is_ascii_alphabetic())
+}
+
+/// 1-edit letter variants of `raw` (lowercased): adjacent-key
+/// substitutes, single deletes, adjacent transposes, and inserts of
+/// letters adjacent to a neighboring char. Sorted + deduped + capped at
+/// [`QWERTY_VARIANT_CAP`] (fixed-count budget). Used ONLY for encode
+/// (pre-encode typo model, plan/22) — the commit form is always the
+/// verbatim `raw`, never a variant.
+fn qwerty_variants(raw: &str) -> Vec<String> {
+    if !qwerty_variant_gate(raw) {
+        return Vec::new();
+    }
+    let lower = raw.to_lowercase();
+    let ch: Vec<char> = lower.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    // Substitutes (adjacent keys only).
+    for (i, &c) in ch.iter().enumerate() {
+        if !c.is_ascii_lowercase() {
+            continue;
+        }
+        for n in qwerty_neighbors(c) {
+            let mut v = ch.clone();
+            v[i] = n;
+            out.push(v.into_iter().collect());
+        }
+    }
+    // Deletes.
+    for i in 0..ch.len() {
+        let mut v = ch.clone();
+        v.remove(i);
+        out.push(v.into_iter().collect());
+    }
+    // Adjacent transposes.
+    for i in 1..ch.len() {
+        let mut v = ch.clone();
+        v.swap(i - 1, i);
+        out.push(v.into_iter().collect());
+    }
+    // Inserts (letters adjacent to either flanking char, union).
+    for i in 0..=ch.len() {
+        let mut cands: Vec<char> = Vec::new();
+        if i > 0 && ch[i - 1].is_ascii_lowercase() {
+            cands.extend(qwerty_neighbors(ch[i - 1]));
+        }
+        if i < ch.len() && ch[i].is_ascii_lowercase() {
+            cands.extend(qwerty_neighbors(ch[i]));
+        }
+        cands.sort();
+        cands.dedup();
+        for n in cands {
+            let mut v = ch.clone();
+            v.insert(i, n);
+            out.push(v.into_iter().collect());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out.retain(|v| v != &lower);
+    out.truncate(QWERTY_VARIANT_CAP);
+    out
+}
+
+/// True when `word` is the raw text itself (case-insensitive) or one
+/// letter-edit away (adjacent-substitute, delete, insert, transpose) —
+/// i.e. a CORRECTION. Anything else the union surfaced (prefix
+/// completions like `tehran` for `teh`) is a completion. Classification
+/// mirrors generation: substitutes must be QWERTY-adjacent.
+fn is_qwerty_correction(raw_lower: &str, word_lower: &str) -> bool {
+    if raw_lower == word_lower {
+        return true;
+    }
+    let a: Vec<char> = raw_lower.chars().collect();
+    let b: Vec<char> = word_lower.chars().collect();
+    // Substitute (same length, exactly one diff, adjacent keys).
+    if a.len() == b.len() {
+        let mut diffs = 0;
+        let mut pair = (' ', ' ');
+        for (&x, &y) in a.iter().zip(b.iter()) {
+            if x != y {
+                diffs += 1;
+                pair = (x, y);
+                if diffs > 1 {
+                    break;
+                }
+            }
+        }
+        if diffs == 1 && qwerty_neighbors(pair.0).contains(&pair.1) {
+            return true;
+        }
+        // Transpose (same length, one adjacent swap).
+        if diffs == 2 {
+            for i in 1..a.len() {
+                let mut t = a.clone();
+                t.swap(i - 1, i);
+                if t == b {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    // Delete/insert (lengths differ by exactly one).
+    if a.len() + 1 == b.len() {
+        // `b` is `a` plus one inserted char.
+        for i in 0..=a.len() {
+            if let Some(&bc) = b.get(i) {
+                let mut w = a.clone();
+                w.insert(i, bc);
+                if w == b {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    if a.len() == b.len() + 1 {
+        for i in 0..a.len() {
+            let mut v = a.clone();
+            v.remove(i);
+            if v == b {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// One QWERTY correction/completion (UniFFI record): `is_correction`
+/// distinguishes typo fixes (center-bold slot) from prefix completions
+/// (right slot). `score` runs the SAME weights as T9 (freq + personal +
+/// bigram + recency + cat + keyfit − reject) — only the match set differs
+/// (letter-graph pre-encode, never T9 digit-neighbors).
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct QwertyCorrection {
+    pub word: String,
+    pub score: f64,
+    pub seq: String,
+    pub cat: String,
+    pub is_correction: bool,
+}
+
+/// QWERTY suggest output (UniFFI record): `literal` is ALWAYS the verbatim
+/// raw text (AOSP: never missing); `corrections` are scored dict words;
+/// `confident` gates Space-takes-correction (`S(top) − S(literal) >
+/// threshold`). QWERTY and T9 ranking never blend (MASTER rule 5): this
+/// path never applies [`SHORT_EXACT_BOOST`], never reads the digit-neighbor
+/// policy — the frozen T9 arms are untouched by construction (no shared
+/// mutable state, separate entry point).
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct QwertyResult {
+    pub literal: String,
+    pub corrections: Vec<QwertyCorrection>,
+    pub confident: bool,
+}
 /// Scored candidate returned to the UI / UniFFI.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Suggestion {
@@ -1369,6 +1590,7 @@ impl DictionaryStack {
             mapping,
             opts,
             &is_one_edit_neighbor,
+            &[],
         );
         let union_size = merged.len();
         let mut items: Vec<MergedRow> = merged.into_values().collect();
@@ -1386,7 +1608,7 @@ impl DictionaryStack {
         let pre_rank = items.iter().position(|m| m.word == target).map(|i| i + 1);
         let in_truncate200 = pre_rank.map(|r| r <= 200).unwrap_or(false);
         let prev = ctx.split_whitespace().last().unwrap_or("").to_lowercase();
-        let mut scored_all = self.score_rows(items, &prev, active_tab, now);
+        let mut scored_all = self.score_rows(items, &prev, active_tab, now, true);
         scored_all.sort_by(cmp_scored);
         let scored_rank = scored_all
             .iter()
@@ -1588,6 +1810,175 @@ impl DictionaryStack {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// QWERTY suggest (plan/22 Step 1): literal slot + letter-graph
+    /// corrections + confidence. Additive alongside the frozen T9 arms —
+    /// never a fork: same union builder (same isolation, same merge
+    /// discipline), same weights, separate entry point with its own opts
+    /// (prefix ON, digit-neighbors OFF — the typo model is the letter
+    /// graph pre-encode, passed as `extra_exact`) and NO short-exact
+    /// boost (MASTER rule 5: T9 and QWERTY ranking never blend).
+    ///
+    /// `literal` is always the verbatim `raw` (AOSP: never missing — even
+    /// on misses, empty input, or limit 0). `corrections` are scored dict
+    /// words minus the literal itself (case-insensitive); each carries
+    /// `is_correction` (typo fix, center-bold slot) vs completion (right
+    /// slot). `confident = S(top) − S(literal_as_OOV) >
+    /// autocorrect_threshold`: Space takes the correction only then.
+    /// Pass `f64::INFINITY` for Suggest-only (corrections shown, Space
+    /// keeps the literal); pass `limit == 0` for Off (literal only).
+    /// Same quantization contract as [`Self::suggest_at`].
+    pub fn suggest_qwerty_at(
+        &self,
+        raw: &str,
+        ctx: &str,
+        active_tab: &str,
+        limit: usize,
+        mapping: &dyn KeyMapping,
+        now: i64,
+        autocorrect_threshold: f64,
+    ) -> QwertyResult {
+        let literal = raw.to_string();
+        if limit == 0 {
+            return QwertyResult {
+                literal,
+                corrections: Vec::new(),
+                confident: false,
+            };
+        }
+        let layout_id = mapping.layout_id();
+        let raw_seq = mapping.encode_word(raw);
+        let mut variant_seqs: Vec<String> = qwerty_variants(raw)
+            .iter()
+            .map(|v| mapping.encode_word(v))
+            .filter(|s| !s.is_empty())
+            .collect();
+        variant_seqs.sort();
+        variant_seqs.dedup();
+        if raw_seq.is_empty() && variant_seqs.is_empty() {
+            return QwertyResult {
+                literal,
+                corrections: Vec::new(),
+                confident: false,
+            };
+        }
+        // QWERTY policy: exact + prefix on the raw seq, letter-graph
+        // variants exact-only, hard tab filter. Digit-neighbors stay OFF
+        // (they would collapse `q/w`, `o/p` geometry post-encode).
+        let opts = SuggestOpts {
+            include_prefix: true,
+            include_neighbor: false,
+            hard_tab_filter: true,
+            ..Default::default()
+        };
+        let build = |seqs_of: &dyn Fn(&DictEntry) -> (Cow<'_, str>, Cow<'_, [String]>)| {
+            self.build_union(
+                &raw_seq,
+                active_tab,
+                layout_id,
+                seqs_of,
+                mapping,
+                &opts,
+                &|_, _| false,
+                &variant_seqs,
+            )
+        };
+        let merged = if PRECOMPUTED_LAYOUTS.contains(&layout_id) {
+            build(&|e| {
+                (
+                    Cow::Borrowed(e.seq_for_layout(layout_id)),
+                    Cow::Borrowed(e.aliases_for_layout(layout_id)),
+                )
+            })
+        } else {
+            build(&|e| {
+                let (primary, aliases) = e.custom_seqs(mapping);
+                (Cow::Owned(primary), Cow::Owned(aliases))
+            })
+        };
+        // Same SPEC 200-cap + total order as the T9 path.
+        let mut items: Vec<MergedRow> = merged.into_values().collect();
+        items.sort_by(|a, b| {
+            b.freq_base
+                .cmp(&a.freq_base)
+                .then_with(|| a.word.cmp(&b.word))
+                .then_with(|| a.lang.cmp(&b.lang))
+        });
+        items.truncate(200);
+        let prev = ctx.split_whitespace().last().unwrap_or("").to_lowercase();
+        // Unfiltered: the literal row must be observable for its score
+        // even when it sits below the display threshold (a known word
+        // typed verbatim scores WITH its frequency — delta ~0 against
+        // itself, so Space keeps it). Corrections filter below.
+        let mut scored = self.score_rows(items, &prev, active_tab, now, false);
+        scored.sort_by(cmp_scored);
+        let raw_lower = raw.to_lowercase();
+        // Literal score: the union row when `raw` is a known word (full
+        // freq + personal overlay — typing `the` must not "correct" to
+        // `then`), else the SAME formula as an OOV (freq 0, keyfit 1.0,
+        // same-tab boost). Never depends on threshold/block membership:
+        // the slot is always present.
+        let literal_score = scored
+            .iter()
+            .find(|s| s.word.to_lowercase() == raw_lower)
+            .map(|s| s.score)
+            .unwrap_or_else(|| {
+                let p = self.personal.get(raw);
+                let (freq_personal, in_personal, acc, rej, last_seen) = match p {
+                    Some(e) if !e.deleted => (e.count, true, e.acc, e.rej, e.last_seen),
+                    _ => (0, false, 0, 0, 0),
+                };
+                let (bpw, bp, bv) = if prev.is_empty() {
+                    (0, 0, 1)
+                } else {
+                    self.personal.bigram_counts(&prev, raw)
+                };
+                score_candidate(
+                    &RankInput {
+                        freq_base: 0,
+                        freq_personal,
+                        in_personal,
+                        bigram_pw: bpw,
+                        bigram_prev: bp,
+                        bigram_vocab: bv,
+                        now_ts: now,
+                        last_seen_ts: last_seen,
+                        cat_boost: 1.0,
+                        keyfit: 1.0,
+                        accepts: acc,
+                        rejects: rej,
+                        temporal: 0.0,
+                    },
+                    &self.weights,
+                )
+            });
+        let raw_lower = raw.to_lowercase();
+        let corrections: Vec<QwertyCorrection> = scored
+            .into_iter()
+            .filter(|s| s.word.to_lowercase() != raw_lower)
+            .filter(|s| s.score >= self.weights.hide_threshold)
+            .take(limit)
+            .map(|s| {
+                let is_correction = is_qwerty_correction(&raw_lower, &s.word.to_lowercase());
+                QwertyCorrection {
+                    word: s.word,
+                    score: s.score,
+                    seq: s.seq,
+                    cat: s.cat,
+                    is_correction,
+                }
+            })
+            .collect();
+        let confident = corrections
+            .first()
+            .is_some_and(|c| c.score - literal_score > autocorrect_threshold);
+        QwertyResult {
+            literal,
+            corrections,
+            confident,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     /// Build the suggest union (static rows + personal OOV) without
     /// truncating or scoring: shared by [`Self::suggest_inner`] and the
     /// step-1 miss instrumentation ([`Self::probe_target_at`]).
@@ -1608,6 +1999,12 @@ impl DictionaryStack {
         mapping: &dyn KeyMapping,
         opts: &SuggestOpts,
         is_neighbor_edit: &dyn Fn(&str, &str) -> bool,
+        // Extra exact-only match seqs (plan/22 letter-graph variants,
+        // pre-encoded under `mapping`): a row matching one scores keyfit
+        // 1.0. Never cached (they derive from the raw text, not the
+        // digits — two raws can share a seq), never prefix-expanded.
+        // Empty on every T9 path (behavior there is byte-identical).
+        extra_exact: &[String],
     ) -> HashMap<String, MergedRow> {
         // Union across base + extensions, keyed by (norm word, lang).
         // Each row matches match-any over its (primary, aliases) seqs;
@@ -1625,7 +2022,12 @@ impl DictionaryStack {
         let keyfit_of = |eseq: &str| -> Option<f64> {
             if eseq == digits {
                 Some(1.0)
-            } else if opts.include_prefix && eseq.starts_with(digits) {
+            } else if !digits.is_empty() && opts.include_prefix && eseq.starts_with(digits) {
+                // `starts_with("")` is true for every row: the QWERTY path
+                // may pass empty digits (raw unencodable, variants live),
+                // so the prefix phase needs the non-empty guard.
+                // `suggest_inner` never passes empty digits (early return),
+                // so T9 output is unchanged.
                 Some(opts.prefix_keyfit)
             } else if opts.include_neighbor && is_neighbor_edit(digits, eseq) {
                 Some(opts.neighbor_keyfit)
@@ -1644,6 +2046,15 @@ impl DictionaryStack {
                     best = Some(best.map_or(k, |m: f64| m.max(k)));
                 }
             }
+            // Plan/22 extra exacts (variant seqs): exact-only at 1.0.
+            // Empty `extra_exact` short-circuits (no T9 cost).
+            if best.is_none() && !extra_exact.is_empty() && !primary.is_empty() {
+                if extra_exact.iter().any(|v| v == primary)
+                    || aliases.iter().any(|a| extra_exact.contains(a))
+                {
+                    best = Some(1.0);
+                }
+            }
             best
         };
         if PRECOMPUTED_LAYOUTS.contains(&layout_id) && self.seq_postings.contains_key(layout_id) {
@@ -1652,7 +2063,7 @@ impl DictionaryStack {
             // Same match-any semantics as the scan below (best keyfit
             // across primary + aliases), merged in ascending row order so
             // first-wins display is identical.
-            self.merge_indexed(digits, active_tab, layout_id, mapping, opts, &mut merged);
+            self.merge_indexed(digits, active_tab, layout_id, mapping, opts, &mut merged, extra_exact);
         } else {
             // Legacy per-entry scan: custom layouts with no index, or a
             // layout whose FST failed to build (explicit error via
@@ -1683,13 +2094,24 @@ impl DictionaryStack {
         // unencodable under the layout falls back to the frozen t9-9
         // skeleton, and only a word unencodable under both is skipped.
         let mut enc_buf = String::new();
+        // Shortest extra seq (plan/22): the length gate below must admit
+        // words matching a short variant even when the raw seq is longer
+        // (e.g. raw `teh` deletes to `te`). `None` on T9 paths (no extras)
+        // keeps the gate byte-identical there.
+        let extra_floor = extra_exact
+            .iter()
+            .map(|v| v.chars().count())
+            .min();
         for p in self.personal.live_entries() {
             // Length gate: a word emits at most one code per char, so a
             // word with fewer chars than the digit string can never be an
             // exact, prefix, or same-length neighbor match. Skips the
             // encode + map work. (Char counts on both sides: sound for
             // multi-byte custom codes too.)
-            if p.word.chars().count() < digits.chars().count() {
+            let floor = extra_floor.map_or(digits.chars().count(), |m| {
+                m.min(digits.chars().count())
+            });
+            if p.word.chars().count() < floor {
                 continue;
             }
             // Personal overlay carries its category: an OOV learned under
@@ -1716,13 +2138,17 @@ impl DictionaryStack {
             let primary = enc_buf.as_str();
             let keyfit = if primary == digits {
                 1.0
-            } else if opts.include_prefix && primary.starts_with(digits) {
+            } else if !digits.is_empty() && opts.include_prefix && primary.starts_with(digits) {
                 opts.prefix_keyfit
             } else if opts.include_neighbor
                 && primary.len() == digits.len()
                 && mapping.is_one_edit_neighbor(digits, primary)
             {
                 opts.neighbor_keyfit
+            } else if !extra_exact.is_empty() && extra_exact.iter().any(|v| v == primary) {
+                // Plan/22 variant-exact (personal-OOV side): the learned
+                // word encodes to a typo-variant seq.
+                1.0
             } else {
                 continue;
             };
@@ -1768,15 +2194,17 @@ impl DictionaryStack {
     }
 
     /// Score union rows (blocked words skipped, sub-threshold scores
-    /// hidden), unsorted. Shared by [`Self::suggest_inner`] (which passes
-    /// the truncated set) and [`Self::probe_target_at`] (full set, no
-    /// truncate, so the true scored rank is observable).
+    /// hidden unless `apply_threshold` is false), unsorted. Shared by
+    /// [`Self::suggest_inner`] and [`Self::probe_target_at`] (both pass
+    /// `true`) and the QWERTY path (passes `false`: corrections filter
+    /// downstream, the literal slot is never threshold-hidden).
     fn score_rows(
         &self,
         items: Vec<MergedRow>,
         prev: &str,
         active_tab: &str,
         now: i64,
+        apply_threshold: bool,
     ) -> Vec<Scored> {
         let mut scored: Vec<Scored> = Vec::new();
         for m in items {
@@ -1827,7 +2255,7 @@ impl DictionaryStack {
                 "suggest: score must never be NaN for {:?} (inputs cannot NaN: log10(>=1), bounded exp)",
                 m.word
             );
-            if score < self.weights.hide_threshold {
+            if apply_threshold && score < self.weights.hide_threshold {
                 continue;
             }
             scored.push(Scored {
@@ -1885,6 +2313,7 @@ impl DictionaryStack {
             mapping,
             opts,
             is_neighbor_edit,
+            &[],
         );
 
         // Cap matches at 200 before the top-N heap (SPEC). The pre-truncate
@@ -1932,7 +2361,7 @@ impl DictionaryStack {
             });
         }
 
-        let mut scored = self.score_rows(items, &prev, active_tab, now);
+        let mut scored = self.score_rows(items, &prev, active_tab, now, true);
 
         // Short-exact boost (plan/17 Step 2): exact-length matches at
         // len<=2 outrank longer prefixes (`s` before `some`); freq still
@@ -2054,6 +2483,12 @@ impl DictionaryStack {
     /// minus one code) hit filters the parent set with borrow-only keyfit
     /// checks instead of re-running the FST page. Neighbors regenerate
     /// every keystroke (cheap: `len x ~8` lookups) on all three paths.
+    ///
+    /// `extra_exact` (plan/22 letter-graph variants): exact posting lookups
+    /// merged into the best-keyfit table on ALL THREE paths (never cached —
+    /// variants derive from the raw text, and two raws can share a seq).
+    /// Empty on every T9 path.
+    #[allow(clippy::too_many_arguments)]
     fn merge_indexed(
         &self,
         digits: &str,
@@ -2062,6 +2497,7 @@ impl DictionaryStack {
         mapping: &dyn KeyMapping,
         opts: &SuggestOpts,
         merged: &mut HashMap<String, MergedRow>,
+        extra_exact: &[String],
     ) {
         let postings = self.seq_postings.get(layout_id).unwrap_or_else(|| {
             panic!(
@@ -2092,12 +2528,16 @@ impl DictionaryStack {
                 if opts.include_neighbor {
                     self.merge_neighbors(digits, mapping, postings, opts.neighbor_keyfit, &mut hits);
                 }
+                self.merge_extra_exact(postings, extra_exact, &mut hits);
                 self.merge_hits(active_tab, layout_id, hits, merged, opts);
                 return;
             }
             // Path 2: parent hit — exact+prefix matches only shrink as
             // digits grow, so filter the parent set with borrow-only
-            // checks (no FST page, no encodes).
+            // checks (no FST page, no encodes). Skipped for empty digits
+            // (the QWERTY unencodable-raw shape): `starts_with("")` would
+            // otherwise match every parent row.
+            if !digits.is_empty() {
             if let Some(parent) = digits.get(..digits.len().saturating_sub(1)) {
                 let pkey = (
                     layout_id.to_string(),
@@ -2140,10 +2580,12 @@ impl DictionaryStack {
                     if opts.include_neighbor {
                         self.merge_neighbors(digits, mapping, postings, opts.neighbor_keyfit, &mut hits);
                     }
+                    self.merge_extra_exact(postings, extra_exact, &mut hits);
                     self.merge_hits(active_tab, layout_id, hits, merged, opts);
                     return;
                 }
             }
+            } // end empty-digits guard (Path 2 needs non-empty digits)
         }
         // Path 3: cold — exact lookup + FST prefix page, recording the
         // exact+prefix set for the cache. Phases run exact-first so the
@@ -2152,13 +2594,17 @@ impl DictionaryStack {
         // The prefix page is skipped outright when `include_prefix` is
         // false (exact-only experiment arm).
         let mut mine: Vec<(u32, u8)> = Vec::new();
-        if let Some(rows) = postings.get(digits) {
-            for &r in rows {
-                Self::note_hit(&mut hits, r, 1.0);
-                mine.push((r, 1));
+        if !digits.is_empty() {
+            if let Some(rows) = postings.get(digits) {
+                for &r in rows {
+                    Self::note_hit(&mut hits, r, 1.0);
+                    mine.push((r, 1));
+                }
             }
         }
-        if opts.include_prefix {
+        // Empty digits (QWERTY unencodable-raw shape) skip the prefix page:
+        // `StartsWith("")` would otherwise page the whole index.
+        if !digits.is_empty() && opts.include_prefix {
             if let Some(set) = self.fst_by_layout.get(layout_id) {
                 let auto = fst::automaton::Str::new(digits).starts_with();
                 let mut stream = set.search(auto).into_stream();
@@ -2197,7 +2643,28 @@ impl DictionaryStack {
         if opts.include_neighbor {
             self.merge_neighbors(digits, mapping, postings, opts.neighbor_keyfit, &mut hits);
         }
+        self.merge_extra_exact(postings, extra_exact, &mut hits);
         self.merge_hits(active_tab, layout_id, hits, merged, opts);
+    }
+
+    /// Plan/22 extra-exact phase: every variant seq becomes an exact
+    /// posting-list lookup at keyfit 1.0, recorded into the best-keyfit
+    /// table (never merged directly, never cached). A row reachable via
+    /// two variants still counts its frequency once; a row the exact phase
+    /// already hit keeps the max (1.0 either way).
+    fn merge_extra_exact(
+        &self,
+        postings: &HashMap<String, Vec<u32>>,
+        extra_exact: &[String],
+        hits: &mut HashMap<u32, f64>,
+    ) {
+        for v in extra_exact {
+            if let Some(rows) = postings.get(v.as_str()) {
+                for &r in rows {
+                    Self::note_hit(hits, r, 1.0);
+                }
+            }
+        }
     }
 
     /// Record one phase hit: keep the best keyfit per row index so the
@@ -3678,6 +4145,190 @@ mod tests {
             "seed row must count once: got {} want {expect}",
             matches[0].score
         );
+    }
+
+    // ---- Plan/22 QWERTY parity (literal + letter-graph corrections +
+    // confidence). T9 arms stay frozen: these tests pin the new path only,
+    // plus a control that the T9 policy cannot explain graph corrections.
+
+    fn qwerty_stack() -> DictionaryStack {
+        DictionaryStack::new(
+            DictionaryStack::load_base_json(
+                r#"[{"w":"the","freq":9000,"cat":"EN"},
+                    {"w":"was","freq":5000,"cat":"EN"},
+                    {"w":"open","freq":4000,"cat":"EN"}]"#,
+            )
+            .unwrap(),
+        )
+    }
+
+    fn t9_mapping() -> LayoutRegistry {
+        LayoutRegistry::with_builtins()
+    }
+
+    #[test]
+    fn qwerty_graph_matches_physical_board() {
+        // Fat-finger pairs share an edge; diagonal non-neighbors don't.
+        assert!(qwerty_neighbors('q').contains(&'w'));
+        assert!(qwerty_neighbors('w').contains(&'q'));
+        assert!(qwerty_neighbors('o').contains(&'p'));
+        assert!(qwerty_neighbors('a').contains(&'s'));
+        assert!(!qwerty_neighbors('q').contains(&'s'));
+        assert!(!qwerty_neighbors('m').contains(&'l'));
+        assert!(!qwerty_neighbors('q').contains(&'q'));
+        assert!(qwerty_neighbors('1').is_empty());
+        // Symmetry spot-check over the whole graph.
+        for c in 'a'..='z' {
+            for n in qwerty_neighbors(c) {
+                assert!(
+                    qwerty_neighbors(n).contains(&c),
+                    "adjacency must be symmetric: {c} -> {n}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn qwerty_variants_cover_typo_shapes_deterministically() {
+        // `teh`Transpose->`the`, `qas`-substitute->`was`, `ooen`-insert
+        // shapes all present; output sorted + capped + never raw itself.
+        for (raw, expect) in [("teh", "the"), ("qas", "was"), ("ooen", "open"), ("aas", "was")] {
+            let v = qwerty_variants(raw);
+            assert!(
+                v.contains(&expect.to_string()),
+                "{raw:?} variants must contain {expect:?}"
+            );
+            assert!(!v.contains(&raw.to_string()), "variants never echo raw");
+            let mut sorted = v.clone();
+            sorted.sort();
+            assert_eq!(v, sorted, "variants must be sorted");
+            assert!(v.len() <= QWERTY_VARIANT_CAP);
+        }
+        // Twice-typed determinism (fixed-count, never wall-clock).
+        assert_eq!(qwerty_variants("teh"), qwerty_variants("teh"));
+        // Non-letters take no variants (Sym-taps stay literal-only).
+        assert!(qwerty_variants("teh!").is_empty());
+        assert!(qwerty_variants("123").is_empty());
+        assert!(qwerty_variants("").is_empty());
+        // Apostrophe rides along, letters still expand.
+        assert!(qwerty_variants("don't").iter().any(|v| v.contains('\'')));
+    }
+
+    #[test]
+    fn qwerty_correction_classifier_marks_completions() {
+        assert!(is_qwerty_correction("teh", "teh"));
+        assert!(is_qwerty_correction("teh", "the")); // transpose
+        assert!(is_qwerty_correction("qas", "was")); // adjacent sub
+        assert!(is_qwerty_correction("teh", "te")); // delete
+        assert!(is_qwerty_correction("te", "teh")); // insert
+        assert!(is_qwerty_correction("ooen", "open")); // adjacent sub
+        assert!(!is_qwerty_correction("teh", "tehran")); // completion
+        assert!(!is_qwerty_correction("teh", "tep")); // h->p not adjacent
+        assert!(!is_qwerty_correction("teh", "xyz"));
+    }
+
+    #[test]
+    fn qwerty_teh_corrects_to_the_with_confidence() {
+        // Plan/22 acceptance: typo `teh` → center `the` bold.
+        let stack = qwerty_stack();
+        let reg = t9_mapping();
+        let t9 = reg.get_or_default("t9-9");
+        let now = crate::personal::now_quantized();
+        let r = stack.suggest_qwerty_at("teh", "", "EN", 5, t9, now, AUTOCORRECT_THRESHOLD_DEFAULT);
+        assert_eq!(r.literal, "teh", "literal slot is always verbatim raw");
+        assert!(!r.corrections.is_empty());
+        assert_eq!(r.corrections[0].word, "the");
+        assert!(r.corrections[0].is_correction);
+        assert!(r.confident, "the(9000) must clear the 1.0 delta over OOV teh");
+    }
+
+    #[test]
+    fn qwerty_graph_proof_beyond_t9_digits() {
+        // `q->w` (T9 7 vs 9, non-adjacent) and `a->w` (T9 2 vs 9,
+        // non-adjacent) corrections can only come from the letter graph:
+        // the T9 neighbor-OFF policy on the same digits finds nothing.
+        let stack = qwerty_stack();
+        let reg = t9_mapping();
+        let t9 = reg.get_or_default("t9-9");
+        let now = crate::personal::now_quantized();
+        for (raw, expect) in [("qas", "was"), ("aas", "was"), ("ooen", "open")] {
+            let r = stack.suggest_qwerty_at(raw, "", "EN", 5, t9, now, AUTOCORRECT_THRESHOLD_DEFAULT);
+            assert_eq!(r.literal, raw);
+            assert!(
+                r.corrections.iter().any(|c| c.word == expect && c.is_correction),
+                "{raw:?} must correct to {expect:?}, got {:?}",
+                r.corrections.iter().map(|c| &c.word).collect::<Vec<_>>()
+            );
+            let digits = t9.encode_word(raw);
+            let t9pol = stack.suggest_policy_at("", &digits, "EN", 5, now);
+            assert!(
+                t9pol.iter().all(|c| c.word != expect),
+                "T9 policy must not explain {expect:?} at digits {digits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn qwerty_exact_word_is_literal_not_confident() {
+        // Typing the word itself: literal == word, no self-correction,
+        // delta ~0 means Space keeps exactly what was typed.
+        let stack = qwerty_stack();
+        let reg = t9_mapping();
+        let t9 = reg.get_or_default("t9-9");
+        let now = crate::personal::now_quantized();
+        let r = stack.suggest_qwerty_at("the", "", "EN", 5, t9, now, AUTOCORRECT_THRESHOLD_DEFAULT);
+        assert_eq!(r.literal, "the");
+        assert!(
+            r.corrections.iter().all(|c| c.word != "the"),
+            "the literal must not correct to itself, got {:?}",
+            r.corrections.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+        assert!(!r.confident);
+        // Case preserved verbatim: shouting stays shouting.
+        let r2 = stack.suggest_qwerty_at("Teh", "", "EN", 5, t9, now, AUTOCORRECT_THRESHOLD_DEFAULT);
+        assert_eq!(r2.literal, "Teh");
+        assert!(r2.corrections.iter().any(|c| c.word == "the"));
+    }
+
+    #[test]
+    fn qwerty_threshold_gates_confidence_not_recall() {
+        // The threshold moves the Space decision only: recall is
+        // identical, confidence flips. INFINITY = Suggest-only mode.
+        let stack = qwerty_stack();
+        let reg = t9_mapping();
+        let t9 = reg.get_or_default("t9-9");
+        let now = crate::personal::now_quantized();
+        let strict = stack.suggest_qwerty_at("teh", "", "EN", 5, t9, now, 100.0);
+        let loose = stack.suggest_qwerty_at("teh", "", "EN", 5, t9, now, 0.0);
+        let suggest_only = stack.suggest_qwerty_at("teh", "", "EN", 5, t9, now, f64::INFINITY);
+        for r in [&strict, &loose, &suggest_only] {
+            assert_eq!(r.corrections[0].word, "the");
+        }
+        assert!(!strict.confident);
+        assert!(loose.confident);
+        assert!(!suggest_only.confident, "Suggest-only never autocorrects");
+    }
+
+    #[test]
+    fn qwerty_literal_always_present_off_means_literal_only() {
+        let stack = qwerty_stack();
+        let reg = t9_mapping();
+        let t9 = reg.get_or_default("t9-9");
+        let now = crate::personal::now_quantized();
+        // Total miss: literal slot only, never confident.
+        let r = stack.suggest_qwerty_at("zxqj", "", "EN", 5, t9, now, AUTOCORRECT_THRESHOLD_DEFAULT);
+        assert_eq!(r.literal, "zxqj");
+        assert!(r.corrections.is_empty());
+        assert!(!r.confident);
+        // Empty raw: empty literal, no panic.
+        let r = stack.suggest_qwerty_at("", "", "EN", 5, t9, now, AUTOCORRECT_THRESHOLD_DEFAULT);
+        assert_eq!(r.literal, "");
+        assert!(!r.confident);
+        // Off mode (limit 0): literal only, no corrections, not confident.
+        let r = stack.suggest_qwerty_at("teh", "", "EN", 0, t9, now, AUTOCORRECT_THRESHOLD_DEFAULT);
+        assert_eq!(r.literal, "teh");
+        assert!(r.corrections.is_empty());
+        assert!(!r.confident);
     }
 }
 

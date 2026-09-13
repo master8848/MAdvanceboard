@@ -58,6 +58,30 @@ data class ScoredCandidate(
 )
 
 /**
+ * QWERTY correction/completion (plan/22 Step 1). Mirror of the UniFFI
+ * `QwertyCorrection` record: `isCorrection` selects the center-bold slot
+ * (typo fix) vs the right slot (prefix completion).
+ */
+data class QwertyCorrection(
+    val word: String,
+    val score: Double,
+    val seq: String,
+    val cat: String,
+    val isCorrection: Boolean
+)
+
+/**
+ * QWERTY suggest output (plan/22 Step 1). Mirror of the UniFFI
+ * `QwertyResult` record: `literal` is always the verbatim raw buffer;
+ * `confident` gates Space-takes-correction.
+ */
+data class QwertyResult(
+    val literal: String,
+    val corrections: List<QwertyCorrection>,
+    val confident: Boolean
+)
+
+/**
  * Kotlin mirror of the Rust UniFFI `Predictor` (uniffi 0.32.1; generated
  * bindings vendored at `uniffi/kbcore/kbcore.kt`). Every exported method is
  * represented — signatures follow the Rust order `(ctx, digits, …)`:
@@ -65,6 +89,10 @@ data class ScoredCandidate(
  * - `suggest(ctx, digits, active_tab, limit)` — back-compat `t9-9` path.
  * - `suggestWithLayout(ctx, digits, layout_id, active_tab, limit)` — explicit pad.
  * - `suggestForCat(ctx, digits, active_tab, limit)` — per-tab layout resolve.
+ * - `suggestQwerty(raw, ctx, active_tab, layout_id, limit, autocorrectThreshold)` —
+ *   QWERTY literal + letter-graph corrections + confidence in ONE FFI call
+ *   (plan/22; thresholds 0.5 aggressive / 1.0 default / 2.0 conservative /
+ *   `Double.POSITIVE_INFINITY` suggest-only; `limit == 0` is Off).
  * - `learn(word, category)` / `learnWithShown(word, category, shown)` —
  *   `category` is the pack id (`words`, `ne`, …), NOT the ctx-prev word;
  *   `shown` is the caller-observed last suggest result (plan/05 #5: no
@@ -98,6 +126,14 @@ interface Predictor : AutoCloseable {
         limit: Int
     ): List<ScoredCandidate>
     suspend fun suggestForCat(ctx: String, digits: String, activeTab: String, limit: Int): List<ScoredCandidate>
+    suspend fun suggestQwerty(
+        raw: String,
+        ctx: String,
+        activeTab: String,
+        layoutId: String,
+        limit: Int,
+        autocorrectThreshold: Double
+    ): QwertyResult
     suspend fun learn(word: String, category: String)
     suspend fun learnWithShown(word: String, category: String, shown: List<String>)
     suspend fun forget(word: String)
@@ -146,6 +182,15 @@ class UniFfiPredictor internal constructor(
     private fun List<uniffi.kbcore.Suggestion>.toScored(): List<ScoredCandidate> =
         map { ScoredCandidate(it.word, it.score, it.seq, it.cat, it.layoutId) }
 
+    private fun uniffi.kbcore.QwertyResult.toQwerty(): QwertyResult =
+        QwertyResult(
+            literal = literal,
+            corrections = corrections.map {
+                QwertyCorrection(it.word, it.score, it.seq, it.cat, it.isCorrection)
+            },
+            confident = confident
+        )
+
     override suspend fun suggest(ctx: String, digits: String, activeTab: String, limit: Int) =
         withContext(Dispatchers.Default) { real.suggest(ctx, digits, activeTab, limit.toUInt()).toScored() }
 
@@ -169,6 +214,63 @@ class UniFfiPredictor internal constructor(
         withContext(Dispatchers.Default) {
             real.suggestForCat(ctx, digits, activeTab, limit.toUInt()).toScored()
         }
+
+    override suspend fun suggestQwerty(
+        raw: String,
+        ctx: String,
+        activeTab: String,
+        layoutId: String,
+        limit: Int,
+        autocorrectThreshold: Double
+    ): QwertyResult =
+        withContext(Dispatchers.Default) {
+            try {
+                real.suggestQwerty(raw, ctx, activeTab, layoutId, limit.toUInt(), autocorrectThreshold)
+                    .toQwerty()
+            } catch (e: UnsatisfiedLinkError) {
+                // Stale `libkbcore.so` (pre-`suggest_qwerty` symbols, until
+                // the next `ndk-libs` rebuild): degrade to literal +
+                // prefix completions via the legacy two-call path, never
+                // confident (Suggest-only behavior — a missing symbol must
+                // never become an accidental autocorrect). The exception is
+                // re-thrown as a named cause for the status line via the
+                // caller's own error surface; here we stay typing.
+                legacyQwerty(raw, ctx, activeTab, layoutId, limit)
+            }
+        }
+
+    /**
+     * Stale-`.so` fallback for [suggestQwerty] (see above): literal slot +
+     * legacy `encode` + `suggest` completions, `confident == false` always.
+     * Retired automatically once `ndk-libs` ships the new symbols (the
+     * `try` then succeeds and this never runs).
+     */
+    private suspend fun legacyQwerty(
+        raw: String,
+        ctx: String,
+        activeTab: String,
+        layoutId: String,
+        limit: Int
+    ): QwertyResult {
+        val seq = try {
+            real.encode(raw, layoutId)
+        } catch (_: Exception) {
+            return QwertyResult(literal = raw, corrections = emptyList(), confident = false)
+        }
+        if (seq.isEmpty()) return QwertyResult(literal = raw, corrections = emptyList(), confident = false)
+        val completions = try {
+            real.suggestWithLayout(ctx, seq, layoutId, activeTab, limit.toUInt()).toScored()
+        } catch (_: Exception) {
+            return QwertyResult(literal = raw, corrections = emptyList(), confident = false)
+        }
+        return QwertyResult(
+            literal = raw,
+            corrections = completions
+                .filter { it.word.lowercase() != raw.lowercase() }
+                .map { QwertyCorrection(it.word, it.score, it.seq, it.cat, isCorrection = false) },
+            confident = false
+        )
+    }
 
     override suspend fun learn(word: String, category: String): Unit =
         withContext(Dispatchers.Default) { real.learn(word, category) }
@@ -342,6 +444,34 @@ class StubPredictor : Predictor {
         limit: Int
     ): List<ScoredCandidate> =
         suggest(ctx, digits, activeTab, limit)
+
+    override suspend fun suggestQwerty(
+        raw: String,
+        ctx: String,
+        activeTab: String,
+        layoutId: String,
+        limit: Int,
+        autocorrectThreshold: Double
+    ): QwertyResult =
+        withContext(Dispatchers.Default) {
+            require(limit >= 0) { "StubPredictor.suggestQwerty: negative limit $limit" }
+            // Degraded: literal slot + prefix-filtered learned words as
+            // completions, never confident (no engine, no corrections).
+            val completions = learned
+                .filter { (w, _) ->
+                    w.isNotEmpty() && w.startsWith(raw, ignoreCase = true) &&
+                        !w.equals(raw, ignoreCase = true) && !blocked.contains(w.lowercase())
+                }
+                .sortedWith(
+                    compareBy<Pair<String, String>> { (_, cat) -> if (cat == activeTab) 0 else 1 }
+                        .thenBy { (w, _) -> w }
+                )
+                .take(limit)
+                .map { (w, cat) ->
+                    QwertyCorrection(word = w, score = 0.0, seq = "", cat = cat, isCorrection = false)
+                }
+            QwertyResult(literal = raw, corrections = completions, confident = false)
+        }
 
     override suspend fun learn(word: String, category: String): Unit =
         withContext(Dispatchers.Default) {

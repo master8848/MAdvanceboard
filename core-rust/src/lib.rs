@@ -18,6 +18,6 @@ pub mod gates;
 
 pub use layout::{KeyMapping, LayoutRegistry, LayoutSpec, DEFAULT_LAYOUT_ID};
 pub use predictor::Predictor;
-pub use stack::{DictionaryStack, NextSuggestion, SuggestOpts, Suggestion, TargetProbe};
+pub use stack::{DictionaryStack, NextSuggestion, QwertyCorrection, QwertyResult, SuggestOpts, Suggestion, TargetProbe};
 
 uniffi::setup_scaffolding!("kbcore");
