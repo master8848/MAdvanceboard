@@ -31,9 +31,26 @@ use crate::pack::PackFile;
 use crate::personal::{now_quantized, PersonalDict};
 use crate::rank::{base_term, dequantize_base, quantize_base, score_candidate_with_base, RankInput, RankWeights};
 
-/// Prefix-result cache entry: `(layout_id, digits)` -> exact+prefix
-/// `(row, keyfit-tag)` sets (`1` = exact, `0` = prefix).
-type PrefixCache = HashMap<(String, String), Vec<(u32, u8)>>;
+/// Prefix-result cache entry: `(layout_id, digits, fallback_version)`
+/// -> exact+prefix `(row, keyfit-tag)` sets (`1` = exact, `0` = prefix).
+/// The version pins the single-press fallback generation (plan/17 Step 3):
+/// bumping [`SINGLE_PRESS_FALLBACK_VERSION`] retires stale len-1/len-2
+/// sets across pack updates instead of serving pre-fallback rows.
+type PrefixCache = HashMap<(String, String, u32), Vec<(u32, u8)>>;
+
+/// Single-press fallback generation (plan/17 Step 3). Bump when the
+/// synthetic `key_label` injection rule or [`fallback_freq`] changes so
+/// cached `(layout, digits)` sets from older generations never serve.
+pub const SINGLE_PRESS_FALLBACK_VERSION: u32 = 1;
+
+/// Targeted short-exact bonus (plan/17 Step 2): added to the final score
+/// of exact-length matches (`word.len() == digits.len()`) when
+/// `digits.len() <= 2`, so len-1 `s` outranks longer prefixes (`some`)
+/// while freq still tie-breaks among exacts. Applies ONLY to len<=2 —
+/// len>=3 ordering is byte-identical with or without it. Kept out of
+/// `RankWeights` on purpose: raising global `w_keyfit` hurts both splits
+/// (rank.rs docs), this bonus is scoped, not global.
+pub const SHORT_EXACT_BOOST: f64 = 3.0;
 
 /// Layout ids with precomputed sequences (all current built-ins).
 pub const PRECOMPUTED_LAYOUTS: &[&str] = &["t9-9", "t9-12", "t9-16"];
@@ -675,6 +692,48 @@ fn cmp_scored(a: &Scored, b: &Scored) -> std::cmp::Ordering {
         .then_with(|| a.lang.cmp(&b.lang))
 }
 
+/// Fixed fallback frequency per letter (plan/17 Step 1): `a`/`i` at
+/// word-parity (they ARE words — `a 600000` ships in the pack), `s` with
+/// a head boost (most frequent consonant; makes `suggest("7")` lead with
+/// `s`, the expected single-press result), everything else low. Ranking
+/// among fallback letters still goes through [`SHORT_EXACT_BOOST`] +
+/// freq tie-break, never insertion order.
+fn fallback_freq(c: char) -> u64 {
+    match c {
+        'a' => 600_000,
+        'i' => 500_000,
+        's' => 1_000,
+        _ => 100,
+    }
+}
+
+/// Layout-derived single-press letters for `digits` (plan/17 Step 1):
+/// the `key_label` chars of the LAST digit, in label order. Applies only
+/// when `digits` is 1-2 codes long and the last code is a letter key
+/// (`2`-`9`); `1` (punct), `0` (space), controls, and len>=3 yield none.
+/// QWERTY raw text never reaches here (that path takes
+/// `suggest_qwerty_at`, never `suggest_inner`), so QWERTY single letters
+/// stay literal and never see `pqrs` chips.
+fn single_press_fallback_letters(digits: &str, mapping: &dyn KeyMapping) -> Vec<char> {
+    let n = digits.chars().count();
+    if n == 0 || n > 2 {
+        return Vec::new();
+    }
+    let Some(last) = digits.chars().last() else {
+        return Vec::new();
+    };
+    if !('2'..='9').contains(&last) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for c in mapping.key_label(last).chars() {
+        if c.is_ascii_lowercase() && !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+/// a personal-bigram follower of the committed previous word.
 /// Next-word candidate returned by [`DictionaryStack::suggest_next_at`]:
 /// a personal-bigram follower of the committed previous word.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1747,6 +1806,10 @@ impl DictionaryStack {
                 keyfit: m.keyfit,
                 accepts: acc,
                 rejects: rej,
+                // Plan/13 P1 temporal input: not yet plumbed on this path
+                // (context_counts wiring is separate work); 0.0 = no data
+                // and the weight defaults dormant, so scoring is unchanged.
+                temporal: 0.0,
             };
             // Quantized fast path (plan/05 #7): a single static row with no
             // personal overlay scores its load-time fixed-point base term
@@ -1838,7 +1901,51 @@ impl DictionaryStack {
         });
         items.truncate(200);
 
+        // Single-press fallback (plan/17 Step 1): layout-derived letters
+        // append POST-truncate (truncate-exempt) so low-freq synthetics
+        // survive inside crowded unions (644-row `7*`). Skipped when the
+        // letter already has a row (real pack rows win — never both, so
+        // `merge_row` can never double-sum a synthetic with a seed row).
+        // Explicit `cat` = active tab (the ONE isolation exception:
+        // fallback chips show under every tab) with lowest priority and
+        // `contributors == 1` so the quantized fast path applies.
+        // No-learn is enforced by the caller: chips commit via `commitRaw`
+        // (Android), never the learn path.
+        for c in single_press_fallback_letters(digits, mapping) {
+            let w = c.to_string();
+            if items.iter().any(|m| m.word == w) {
+                continue;
+            }
+            let freq = fallback_freq(c);
+            items.push(MergedRow {
+                word: w,
+                seq: digits.to_string(),
+                freq_base: freq,
+                cat: active_tab.to_string(),
+                lang: "en".to_string(),
+                priority: -1,
+                keyfit: 1.0,
+                contributors: 1,
+                single_q: quantize_base(freq),
+                first_idx: u32::MAX,
+                min_idx: u32::MAX,
+            });
+        }
+
         let mut scored = self.score_rows(items, &prev, active_tab, now);
+
+        // Short-exact boost (plan/17 Step 2): exact-length matches at
+        // len<=2 outrank longer prefixes (`s` before `some`); freq still
+        // tie-breaks among boosted exacts. Len>=3 untouched by
+        // construction (`digits_len > 2` skips the loop body entirely).
+        let digits_len = digits.chars().count();
+        if digits_len <= 2 {
+            for s in scored.iter_mut() {
+                if s.word.chars().count() == digits_len {
+                    s.score += SHORT_EXACT_BOOST;
+                }
+            }
+        }
 
         // Real top-N heap (plan/05 #3): `select_nth_unstable` partitions the
         // top `limit` in O(n) instead of fully sorting, then only the
@@ -1962,7 +2069,11 @@ impl DictionaryStack {
                  (guard with seq_postings.contains_key)"
             )
         });
-        let key = (layout_id.to_string(), digits.to_string());
+        let key = (
+            layout_id.to_string(),
+            digits.to_string(),
+            SINGLE_PRESS_FALLBACK_VERSION,
+        );
         // Per-row best keyfit across exact/prefix/neighbor phases: each row
         // index merges exactly once below, so multi-seq rows (primary +
         // aliases) never sum their own frequency twice.
@@ -1988,7 +2099,11 @@ impl DictionaryStack {
             // digits grow, so filter the parent set with borrow-only
             // checks (no FST page, no encodes).
             if let Some(parent) = digits.get(..digits.len().saturating_sub(1)) {
-                let pkey = (layout_id.to_string(), parent.to_string());
+                let pkey = (
+                    layout_id.to_string(),
+                    parent.to_string(),
+                    SINGLE_PRESS_FALLBACK_VERSION,
+                );
                 if let Some(parent_rows) = cache.get(&pkey) {
                     let mut mine: Vec<(u32, u8)> = Vec::new();
                     for &(idx, _) in parent_rows.iter() {
@@ -3347,4 +3462,222 @@ mod tests {
         let agg2 = stack.suggest_next_at("hello", "★personal", 5, now);
         assert_eq!(agg2.iter().map(|n| n.word.as_str()).collect::<Vec<_>>(), ["dost"]);
     }
+
+    #[test]
+    fn perf_full_packs_plus_10k_personal_p95_under_50ms() {
+        // Plan/05 acceptance bench: full shipped packs (words_en 5150 +
+        // nepali 8005 ≈ 13k static, above the 6613-word target) + 10k
+        // personal rows, production policy path. Fixed-count workload —
+        // never a wall-clock cutoff in logic; the clock is measurement
+        // only, and `now` is a fixed hour bucket so output is deterministic.
+        // Target: p95 < 50ms on minSdk26. Host release/debug timings print
+        // for the record; the hard assertion carries a wide margin so the
+        // test never flakes on a loaded host.
+        use crate::pack::load_pack_str;
+        let en = load_pack_str(include_str!("../../packs/words_en.json")).unwrap();
+        let ne = load_pack_str(include_str!("../../packs/nepali.json")).unwrap();
+        let n_en = en.words.len();
+        let n_ne = ne.words.len();
+        let mut stack = DictionaryStack::new(en.to_entries(0));
+        stack.add_pack(&ne, 0);
+        let n_static = stack.fst_len();
+        for i in 0..10_000 {
+            stack.personal.learn(&format!("zpersonal{i:05}"), "EN");
+        }
+        assert_eq!(stack.personal.len(), 10_000);
+
+        // Fixed query set: prefixes (len 2..=6) of real pack words under
+        // t9-9, plus fixed miss shapes. Sorted+deduped => fixed order,
+        // fixed count, every run.
+        let reg = LayoutRegistry::with_builtins();
+        let t9 = reg.get_or_default("t9-9");
+        let words = [
+            "the", "be", "to", "of", "and", "a", "in", "that", "have", "hello", "hell",
+            "help", "world", "water", "house", "time", "people", "good", "first", "know",
+            "like", "over", "think", "after", "such", "only", "come", "could", "than",
+            "then", "them", "these", "some", "would", "make", "year", "into", "more",
+            "long", "down", "go", "about", "again", "against", "money", "mother",
+            "father", "night", "seven", "eight", "three", "where", "which", "their",
+            "there", "other", "those", "should", "never", "every", "under", "while",
+            "might", "seven",
+        ];
+        let mut queries: Vec<String> = Vec::new();
+        for w in words {
+            // Whole typing chains from the first digit (len 1..=6), exactly
+            // what the IME issues per keystroke.
+            let s = t9.encode_word(w);
+            for l in 1..=s.len().min(6) {
+                queries.push(s[..l].to_string());
+            }
+        }
+        queries.extend(["999999".to_string(), "111111".to_string(), "000".to_string()]);
+        queries.sort();
+        queries.dedup();
+        assert!(queries.len() > 100, "workload must be non-trivial");
+
+        let now = 1_726_000_000i64; // fixed 1h-bucket timestamp, not wall clock
+        let words_of = |s: Vec<Suggestion>| {
+            s.into_iter().map(|x| (x.word, x.score.to_bits())).collect::<Vec<_>>()
+        };
+        let mut first: Vec<Vec<(String, u64)>> = Vec::with_capacity(queries.len());
+        let mut dts: Vec<std::time::Duration> = Vec::with_capacity(queries.len());
+        for digits in &queries {
+            let t0 = std::time::Instant::now();
+            let out = stack.suggest_policy_at("", digits, "EN", 10, now);
+            dts.push(t0.elapsed());
+            first.push(words_of(out));
+        }
+        dts.sort();
+        let mean = dts.iter().sum::<std::time::Duration>() / dts.len() as u32;
+        let p95 = dts[dts.len() * 95 / 100];
+        let max = dts[dts.len() - 1];
+        println!(
+            "perf: packs words_en={n_en} nepali={n_ne} fst_seqs={n_static} personal=10000 \
+             queries={} mean={mean:?} p95={p95:?} max={max:?} (target p95<50ms)",
+            queries.len(),
+        );
+        assert!(
+            p95 < std::time::Duration::from_millis(50),
+            "p95 {p95:?} exceeds the 50ms budget over {} queries",
+            queries.len(),
+        );
+        // Second pass must be byte-identical: the prefix cache is
+        // behavior-neutral (speed only), never a second result set.
+        for (digits, expect) in queries.iter().zip(first.iter()) {
+            let again = words_of(stack.suggest_policy_at("", digits, "EN", 10, now));
+            assert_eq!(&again, expect, "cache moved results at {digits}");
+        }
+        // Attribution scratch (temporary): same workload with an empty
+        // personal dict isolates the static-index cost from the 10k
+        // personal-OOV scan.
+        stack.personal = crate::personal::PersonalDict::new();
+        let mut dts0: Vec<std::time::Duration> = Vec::with_capacity(queries.len());
+        for digits in &queries {
+            let t0 = std::time::Instant::now();
+            let _ = stack.suggest_policy_at("", digits, "EN", 10, now);
+            dts0.push(t0.elapsed());
+        }
+        dts0.sort();
+        println!(
+            "perf/attribution: no-personal mean={:?} p95={:?} max={:?}",
+            dts0.iter().sum::<std::time::Duration>() / dts0.len() as u32,
+            dts0[dts0.len() * 95 / 100],
+            dts0[dts0.len() - 1],
+        );
+        for (digits, expect) in queries.iter().zip(first.iter()) {
+            let again = words_of(stack.suggest_policy_at("", digits, "EN", 10, now));
+            assert_eq!(&again, expect, "cache moved results at {digits}");
+        }
+    }
+
+    // ---- Plan/17 single-press fallback (len<=2 synthetic key_label
+    // injection, truncate-exempt, no-learn, short-exact boost). ----
+
+    fn single_press_stack() -> DictionaryStack {
+        // `7*` union: some/school/sad are multi-letter prefixes; the
+        // single letters s/p/q/r can only come from the synthetic
+        // fallback (no len-1 rows seeded — fallback and seed rows must
+        // never coexist, or merge_row would double-sum them).
+        DictionaryStack::new(
+            DictionaryStack::load_base_json(
+                r#"[{"w":"some","freq":5000,"cat":"EN"},
+                    {"w":"school","freq":3000,"cat":"EN"},
+                    {"w":"sad","freq":1000,"cat":"EN"},
+                    {"w":"so","freq":200,"cat":"EN"},
+                    {"w":"an","freq":8000,"cat":"EN"}]"#,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn single_press_7_leads_with_s() {
+        // plan/17 acceptance: `suggest("7","words")` contains s (+p/q/r)
+        // with s first — never empty/wrong.
+        let stack = single_press_stack();
+        let s = stack.suggest("", "7", "words", 10);
+        assert!(!s.is_empty(), "single press must never be empty");
+        assert_eq!(s[0].word, "s", "got {:?}", s.iter().map(|c| &c.word).collect::<Vec<_>>());
+        for letter in ["s", "p", "q", "r"] {
+            assert!(
+                s.iter().any(|c| c.word == letter),
+                "fallback must contain {letter:?}, got {:?}",
+                s.iter().map(|c| &c.word).collect::<Vec<_>>()
+            );
+        }
+        // Repeat-stable: the post-truncate append is behavior-neutral
+        // across cold/cache paths.
+        let again = stack.suggest("", "7", "words", 10);
+        assert_eq!(
+            s.iter().map(|c| &c.word).collect::<Vec<_>>(),
+            again.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn single_press_2_contains_a_first() {
+        let stack = single_press_stack();
+        let s = stack.suggest("", "2", "words", 10);
+        assert_eq!(s[0].word, "a", "got {:?}", s.iter().map(|c| &c.word).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn short_exact_boost_orders_len2_exact_first() {
+        // `so` (exact len-2, freq 200) must outrank `some` (prefix,
+        // freq 5000): without SHORT_EXACT_BOOST 4.003 < 5.379, with it
+        // 7.003 > 5.379 — this test fails pre-boost.
+        let stack = single_press_stack();
+        let s = stack.suggest("", "76", "words", 10);
+        assert_eq!(s[0].word, "so", "got {:?}", s.iter().map(|c| &c.word).collect::<Vec<_>>());
+        assert!(
+            s.iter().position(|c| c.word == "so").unwrap()
+                < s.iter().position(|c| c.word == "some").unwrap()
+        );
+    }
+
+    #[test]
+    fn len3_and_up_untouched_by_fallback() {
+        // No synthetics at len>=3: `suggest("766")` holds only real rows
+        // (prefix keyfit decides — `song` keeps its pre-boost order over
+        // exact `son`), and punct/space digits inject nothing.
+        let stack = DictionaryStack::new(
+            DictionaryStack::load_base_json(
+                r#"[{"w":"son","freq":200,"cat":"EN"},
+                    {"w":"song","freq":5000,"cat":"EN"}]"#,
+            )
+            .unwrap(),
+        );
+        let s = stack.suggest("", "766", "words", 10);
+        assert_eq!(s[0].word, "song", "got {:?}", s.iter().map(|c| &c.word).collect::<Vec<_>>());
+        assert!(
+            s.iter().all(|c| c.word.chars().count() > 1),
+            "len>=3 must inject no single-letter rows, got {:?}",
+            s.iter().map(|c| &c.word).collect::<Vec<_>>()
+        );
+        assert!(stack.suggest("", "1", "words", 10).is_empty());
+        assert!(stack.suggest("", "0", "words", 10).is_empty());
+    }
+
+    #[test]
+    fn fallback_never_double_counts_seed_rows() {
+        // A real len-1 row wins outright: no synthetic is appended for it,
+        // so its frequency counts exactly once (single-contributor
+        // quantized fast path). A double-sum (50 + synthetic 1000) would
+        // score +1.3 higher.
+        let stack = DictionaryStack::new(
+            DictionaryStack::load_base_json(r#"[{"w":"s","freq":50,"cat":"EN"}]"#).unwrap(),
+        );
+        let s = stack.suggest("", "7", "words", 10);
+        let matches: Vec<_> = s.iter().filter(|c| c.word == "s").collect();
+        assert_eq!(matches.len(), 1, "exactly one `s` row, got {s:?}");
+        let w = crate::rank::RankWeights::default();
+        let expect =
+            dequantize_base(quantize_base(50)) + w.w_cat * 1.0 + w.w_keyfit * 1.0 + SHORT_EXACT_BOOST;
+        assert!(
+            (matches[0].score - expect).abs() < 1e-9,
+            "seed row must count once: got {} want {expect}",
+            matches[0].score
+        );
+    }
 }
+
