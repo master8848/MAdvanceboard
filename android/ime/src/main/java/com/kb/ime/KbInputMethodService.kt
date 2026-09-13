@@ -17,6 +17,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.Lifecycle
+import org.json.JSONObject
 import com.kb.bridge.KbCore
 import com.kb.bridge.Predictor
 import com.kb.bridge.PredictorFactory
@@ -87,8 +88,17 @@ class KbInputMethodService : InputMethodService() {
     private var isEmailOrUri: Boolean = false
     private var predictionEnabled: Boolean = true
     private var inputMode: InputMode = InputMode.TEXT
-    /** QWERTY fallback flag; observable so the FAB label recomposes on toggle. */
+    /** QWERTY fallback flag; observable so the toggle icon recomposes on switch. */
     private var qwertyFallback by mutableStateOf(false)
+    /**
+     * Settings → Suggestions flags ([SuggestionStore]): strip visibility +
+     * auto-space after accept. Re-read in [onStartInputView] so changes
+     * apply without killing the IME; observable so the strip recomposes.
+     */
+    private var showSuggestionsUi by mutableStateOf(true)
+    private var autoSpaceUi by mutableStateOf(true)
+    /** Bumped in [onStartInputView] so the Compose strip re-reads theme+suggestion prefs. */
+    private var prefsTick by mutableStateOf(0)
     /**
      * Active pad layout id (`t9-9` / `t9-12` / `t9-16`). Encoder flag only —
      * plumbed to [suggestWithLayout]/[learnWithLayout]. Resolved per
@@ -178,6 +188,17 @@ class KbInputMethodService : InputMethodService() {
      */
     internal var liveTabs by mutableStateOf(DEFAULT_CATEGORIES)
 
+    /**
+     * Quick-sheet + emoji picker overlay state (plan/19 step 2, plan/24
+     * §5). The ⚙ key opens the current-tab quick-sheet (never a full
+     * Settings deep-link); 🙂 opens the visual emoji picker. Both are
+     * dismissable sheets over the strip — never blocking input.
+     */
+    private var quickSheetVisible by mutableStateOf(false)
+    private var emojiPickerVisible by mutableStateOf(false)
+    private var emojiGlyphs by mutableStateOf(emptyList<String>())
+    private var emojiRecents by mutableStateOf(emptyList<String>())
+
     // -- Plan 01 gesture state (all read by ImeScreen overlays). --
     private var gestureThresholds: GestureThresholds = GestureThresholds()
     private var allowTwelveKeyFlings: Boolean = false
@@ -196,6 +217,26 @@ class KbInputMethodService : InputMethodService() {
      */
     private var placementPopup by mutableStateOf<PlacementState?>(null)
     private var undoText: String = ""
+    /**
+     * Slim-toolbar undo/redo (single-level):
+     * - Android's [android.view.inputmethod.InputConnection] offers NO
+     *   public undo()/redo(). It exposes commit/delete
+     *   ([commitText][deleteSurroundingText]), batching
+     *   ([beginBatchEdit][endBatchEdit]), and the editor-dependent
+     *   `performContextMenuAction(android.R.id.undo/redo)` — which many
+     *   editors ignore, so it is NOT relied upon here.
+     * - Hence: toolbar ↩ = [deleteWords](1) (delete last word via the
+     *   same word-boundary path as fling-delete, wrapped in a batch);
+     *   the deleted span is stashed in [toolbarRedoText] for ↪.
+     * - Toolbar ↪ = re-commit [toolbarRedoText] (no-op + status line
+     *   when empty; button disabled via [toolbarRedoAvailable]).
+     * - Single-level only: a second ↩ overwrites the stash, and any fresh
+     *   commit (candidate/raw/paste/snippet/single-char delete) clears it.
+     *   A pending fling-delete undo ([undoText]) is likewise overwritten
+     *   by toolbar ↩ — documented, not merged.
+     */
+    private var toolbarRedoText: String = ""
+    private var toolbarRedoAvailable by mutableStateOf(false)
     private var lastCommitWord: String? = null
     private var lastCommitTs: Long = 0L
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -284,6 +325,15 @@ class KbInputMethodService : InputMethodService() {
         // default tab is `words`) before first inflate.
         activeLayoutId = LayoutStore.layoutForCat(this, activeAssetId)
         activeSpec = loadLayoutSpec(this, activeLayoutId)
+        // Friend-default board (plan/21 step 2, plan/24 §1): friends start
+        // on QWERTY; 9-key is the opt-in research vehicle. Session state
+        // only — in-session toggles are never clobbered (no re-read in
+        // onStartInputView).
+        qwertyFallback = try {
+            FriendDefaults.qwertyDefault(this)
+        } catch (_: Exception) {
+            false
+        }
         reloadGesturePrefs()
         flingsAllowedAT = AccessibilityGates.evaluate(this).flingsAllowed
         refreshTabs()
@@ -479,10 +529,16 @@ class KbInputMethodService : InputMethodService() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
+        // Dark-aware keyboard background (Compose strip is transparent; the
+        // pad tints its own keys). Recomputed per input-view creation.
+        val kbDark = ThemeStore.isDarkEffective(this)
+        root.setBackgroundColor(if (kbDark) KbDarkBackground.toInt() else 0xFFF2F2F5.toInt())
         val strip = ComposeView(this).apply {
             setContent {
+                androidx.compose.runtime.key(prefsTick) {
+                KbImeTheme(darkTheme = ThemeStore.isDarkEffective(this@KbInputMethodService)) {
                 ImeScreen(
-                    candidates = liveCandidates,
+                    candidates = if (showSuggestionsUi) liveCandidates else emptyList(),
                     categories = liveTabs,
                     onCandidatePicked = { commitCandidate(it) },
                     onExpandAll = { gestureLog.record("bar", "tap-expand", "expand-all") },
@@ -497,6 +553,21 @@ class KbInputMethodService : InputMethodService() {
                     onPlacementToggle = { onPlacementToggle() },
                     onPlacementDismiss = { onPlacementDismiss() },
                     onOpenSettings = { openLayoutSettings() },
+                    onOpenQuickSheet = { openQuickSheet() },
+                    onOpenEmojiPicker = { openEmojiPicker() },
+                    quickSheet = quickSheetState(),
+                    onQuickLayoutPick = { quickPickLayout(it) },
+                    onQuickToggleTab = { quickToggleTab(it) },
+                    onQuickUndo = { undoDelete() },
+                    onQuickToggleIncognito = { toggleManualIncognito() },
+                    onQuickOpenClipboard = { toggleClipboardPanel() },
+                    onQuickOpenDictionaries = { openLayoutSettings() },
+                    onQuickDismiss = { dismissQuickSheet() },
+                    emojiPickerVisible = emojiPickerVisible,
+                    emojiGlyphs = emojiGlyphs,
+                    emojiRecents = emojiRecents,
+                    onEmojiPick = { pickEmoji(it) },
+                    onEmojiDismiss = { dismissEmojiPicker() },
                     symbolsOptions = symbolsOptions,
                     symbolsTitle = symbolsTitle,
                     onSymbolPick = { onSymbolPick(it) },
@@ -535,14 +606,32 @@ class KbInputMethodService : InputMethodService() {
                     onClipboardTogglePin = { toggleClipboardPin(it) },
                     onClipboardDelete = { deleteClipboardItem(it) },
                     onClipboardClearUnpinned = { clearClipboardUnpinned() },
-                    onClipboardClearAll = { clearClipboardAll() }
+                    onClipboardClearAll = { clearClipboardAll() },
+                    onToolbarUndo = { toolbarUndo() },
+                    onToolbarRedo = { toolbarRedo() },
+                    toolbarRedoAvailable = toolbarRedoAvailable,
+                    onToolbarSymbols = { showGenericSymbolsSheet() }
                 )
+                }
+                }
             }
         }
         val pad = makePad()
         pad.tag = "pad"
         root.addView(strip)
         root.addView(pad)
+        // Phone-dependent bottom margin: the system navigation-bar inset
+        // plus a PAD_BOTTOM_MARGIN_DP floor, so gesture/button nav bars
+        // never overlap the pad's bottom row (the Compose strip above
+        // applies the same inset via navigationBarsPadding).
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val navBottom = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.navigationBars()
+            ).bottom
+            val floor = (PAD_BOTTOM_MARGIN_DP * resources.displayMetrics.density).toInt()
+            v.setPadding(0, 0, 0, navBottom + floor)
+            insets
+        }
         // The service window owns no lifecycle: attach ours before the
         // window attaches (ComposeView resolves it in onAttachedToWindow).
         ImeLifecycle.attachTo(root, imeLifecycleOwner)
@@ -598,12 +687,41 @@ class KbInputMethodService : InputMethodService() {
         // while priority (order) changes still need a restart (packs
         // install in priority order — only enable/disable has a live FFI).
         refreshTabs()
+        // Settings → Appearance + Suggestions: re-read prefs so changes
+        // apply without killing the IME; prefsTick recomposes the strip
+        // (theme is read at composition), pad re-tints immediately below.
+        showSuggestionsUi = try { SuggestionStore.showSuggestions(this) } catch (_: Exception) { true }
+        autoSpaceUi = try { SuggestionStore.autoSpace(this) } catch (_: Exception) { true }
+        prefsTick++
+        (cachedInputView as? LinearLayout)?.let { applyLiveTheme(it) }
+    }
+
+    /**
+     * Applies the effective night theme to the live input view: root
+     * background + framework-View key tints. Compose strip colors follow
+     * [KbImeTheme] on the next recomposition (theme state is read at
+     * composition; the strip refreshes on the next keystroke/suggest cycle,
+     * the pad re-tints here immediately).
+     */
+    private fun applyLiveTheme(root: LinearLayout) {
+        root.setBackgroundColor(
+            if (ThemeStore.isDarkEffective(this)) KbDarkBackground.toInt() else 0xFFF2F2F5.toInt()
+        )
+        for (i in 0 until root.childCount) {
+            when (val child = root.getChildAt(i)) {
+                is PadView -> child.refreshKeyTheme()
+                is QwertyView -> child.refreshKeyTheme()
+            }
+        }
     }
 
     /**
      * Re-resolve the visible tab strip from the persisted stack order
      * (plan/08): numbers pinned first, base words/ne, enabled movable
-     * packs in priority order, ★personal pinned last. A corrupt store
+     * packs in priority order, ★personal pinned last — then the
+     * friend-ready audience filter (plan/19, 20, 24): code tabs
+     * (`js/rust/html/math/medical`) hide unless "Show code tabs" is on,
+     * so friends see EN/ने/😀/123 only. A corrupt store
      * keeps the built-in strip and names the cause on the status line
      * instead of breaking the keyboard. Persisted enable flags are then
      * live-synced into the running engine ([syncStackEnableToEngine]) so
@@ -611,7 +729,8 @@ class KbInputMethodService : InputMethodService() {
      */
     private fun refreshTabs() {
         liveTabs = try {
-            DictStackOrder.stripOrder(DictStackOrder.assembleSlots(this))
+            val full = DictStackOrder.stripOrder(DictStackOrder.assembleSlots(this))
+            FriendDefaults.filterTabs(full, FriendDefaults.showCodeTabs(this))
         } catch (e: Exception) {
             android.util.Log.e("KbIME", "Stack order unreadable, using built-ins", e)
             gestureError = "Dictionary stack order unreadable: ${e.message}"
@@ -736,6 +855,21 @@ class KbInputMethodService : InputMethodService() {
     }
 
     /**
+     * Long-press 🌐 (multi-globe menu): opens the system IME picker so the
+     * user can choose among enabled keyboards, instead of cycling blindly.
+     * Failures surface on the status line — never a dead long-press.
+     */
+    internal fun showImePicker() {
+        try {
+            (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+                ?.showInputMethodPicker()
+                ?: reportGestureError("IME picker unavailable: no input method service")
+        } catch (e: Exception) {
+            reportGestureError("IME picker failed: ${e.message}")
+        }
+    }
+
+    /**
      * Enter key: honor the editor's IME_ACTION_* when set (DONE/GO/NEXT/SEARCH/
      * SEND via performEditorAction), else commit a newline.
      */
@@ -759,9 +893,14 @@ class KbInputMethodService : InputMethodService() {
     }
 
     /**
-     * Layout-driven pad input. Punctuation-only keys (e.g. t9 `1`) commit
-     * their first symbol directly (tap-cycle TBD); all other text codes
-     * extend the seq fed to the shared Predictor path with [activeLayoutId].
+     * Layout-driven pad input. Every `text`-role key code (including t9
+     * `1`, whose symbols are punctuation-only) extends the seq fed to the
+     * shared Predictor path with [activeLayoutId] — the engine owns
+     * punctuation suggestions for `1`-seqs, so the service never
+     * short-circuits a text key into a raw commit (that path made `1`
+     * untypeable: it committed "." and dropped the digit from the seq,
+     * so every seq containing `1` suggested for the wrong input).
+     * Punctuation stays reachable via long-press symbols sheet + Sym key.
      *
      * Per-category tap deltas (plan 01):
      * - numbers (no prediction): tap commits the digit raw, no seq.
@@ -775,13 +914,6 @@ class KbInputMethodService : InputMethodService() {
             "KbIME",
             "onPadCode code=$code tab=$activeAssetId layout=$activeLayoutId seq=$seq"
         )
-        val key = activeSpec?.keyByCode(code)
-        val symbols = key?.symbols.orEmpty()
-        if (symbols.isNotEmpty() && symbols.none { it.isLetter() }) {
-            commitText(symbols.substring(0, 1))
-            seq.clear()
-            return
-        }
         val policy = gesturePolicy()
         if (!policy.predictionEnabled) {
             // Numbers: digit-commit, no prediction state.
@@ -935,7 +1067,9 @@ class KbInputMethodService : InputMethodService() {
     }
 
     /**
-     * ⚙ deep-link: opens Settings (Layout section owns global + per-tab).
+     * ⚙ quick-sheet (plan/19 step 2, plan/20 step 3): opens the
+     * current-tab-only editor ([QuickSheet]). Full Settings stays one tap
+     * away via the sheet's Details button ([openLayoutSettings]).
      * String-based component (no `:ime` → `:app` compile dep — both ship in
      * the `com.kb.app` APK, so [packageName] is the host package). Failures
      * surface on the status line, never a dead key.
@@ -944,6 +1078,7 @@ class KbInputMethodService : InputMethodService() {
         try {
             val intent = android.content.Intent()
                 .setClassName(packageName, "com.kb.app.SettingsActivity")
+                .putExtra("section", "dictionaries")
                 .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(intent)
         } catch (e: Exception) {
@@ -952,6 +1087,151 @@ class KbInputMethodService : InputMethodService() {
     }
 
     /**
+     * Quick-sheet state for the current tab (plan/20 step 3): null =
+     * hidden. Layout resolves via [LayoutStore] (override → global →
+     * default); enable/movable come from the assembled stack slots. Fixed
+     * pins (base words/ne, ★personal) render info-only — the toggle never
+     * fires for them. Failures degrade to a minimal state naming the
+     * cause, never a crash.
+     */
+    internal fun quickSheetState(): QuickSheetState? {
+        if (!quickSheetVisible) return null
+        val id = activeAssetId
+        val layoutId = try {
+            LayoutStore.layoutForCat(this, id)
+        } catch (e: Exception) {
+            reportGestureError("Layout prefs unreadable: ${e.message}")
+            DEFAULT_LAYOUT_ID
+        }
+        val slot = try {
+            DictStackOrder.assembleSlots(this).find { it.id == id }
+        } catch (_: Exception) {
+            null
+        }
+        return QuickSheetState(
+            tab = id,
+            layoutId = layoutId,
+            tabEnabled = slot?.enabled ?: true,
+            tabMovable = slot?.let { !it.fixed } ?: false,
+            undoAvailable = undoAvailable,
+            incognito = incognitoUi
+        )
+    }
+
+    internal fun openQuickSheet() {
+        emojiPickerVisible = false
+        quickSheetVisible = true
+        gestureLog.record("settings", "open", "quick-sheet", activeAssetId)
+    }
+
+    internal fun dismissQuickSheet() {
+        quickSheetVisible = false
+    }
+
+    /**
+     * Quick-sheet layout pick: persists the per-tab override for the
+     * CURRENT tab only ([LayoutStore.setCatLayout]) and swaps the pad.
+     * Unknown ids throw loudly and surface on the status line — the sheet
+     * only offers [SUPPORTED_LAYOUT_IDS], so this is defense-in-depth.
+     */
+    internal fun quickPickLayout(layoutId: String) {
+        try {
+            setTabLayout(layoutId)
+        } catch (e: Exception) {
+            reportGestureError("Layout not saved: ${e.message}")
+        }
+    }
+
+    /**
+     * Quick-sheet tab toggle: enable/disable for the CURRENT tab only.
+     * Fixed pins are unreachable (the sheet hides their toggle); customs
+     * route to [CustomPackStore], built-ins to [PackOrderStore]. Refreshes
+     * the strip ([refreshTabs] also live-syncs the flag into the running
+     * engine), so the sheet never forks state from the Dictionaries
+     * editor — same stores, same order.
+     */
+    internal fun quickToggleTab(enabled: Boolean) {
+        val id = activeAssetId
+        try {
+            val slot = DictStackOrder.assembleSlots(this).find { it.id == id }
+            if (slot == null) {
+                reportGestureError("Unknown category \"$id\"")
+                return
+            }
+            if (slot.fixed) return
+            if (slot.custom) CustomPackStore.setEnabled(this, id, enabled)
+            else PackOrderStore.setEnabled(this, id, enabled)
+            refreshTabs()
+            gestureLog.record("settings", "quick-toggle", id, if (enabled) "enabled" else "disabled")
+        } catch (e: Exception) {
+            reportGestureError("Tab toggle failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Emoji picker open (plan/24 §5): glyphs from the installed emoji
+     * pack asset, recents from [EmojiRecents]. A missing asset degrades to
+     * the live strip candidates (never an empty sheet without cause — the
+     * status line names it).
+     */
+    internal fun openEmojiPicker() {
+        quickSheetVisible = false
+        emojiGlyphs = loadEmojiGlyphs()
+        emojiRecents = try {
+            EmojiRecents.load(this)
+        } catch (_: Exception) {
+            emptyList()
+        }
+        emojiPickerVisible = true
+        gestureLog.record("emoji", "open", "picker")
+    }
+
+    internal fun dismissEmojiPicker() {
+        emojiPickerVisible = false
+    }
+
+    /**
+     * Emoji pick: commits the glyph raw (no learn path — emoji carries an
+     * explicit `seq` override, not typed text) and records the recent.
+     * A failed recent-write still commits: recents are convenience, not
+     * correctness.
+     */
+    internal fun pickEmoji(glyph: String) {
+        try {
+            EmojiRecents.record(this, glyph)
+            emojiRecents = EmojiRecents.load(this)
+        } catch (e: Exception) {
+            reportGestureError("Emoji recent not saved: ${e.message}")
+        }
+        try {
+            currentInputConnection?.commitText(glyph, 1)
+        } catch (e: Exception) {
+            reportGestureError("Emoji commit failed: ${e.message}")
+            return
+        }
+        seq.clear()
+        qwertyBuffer.clear()
+        liveCandidates = emptyList()
+        emojiPickerVisible = false
+        gestureLog.record("emoji", "pick", "grid")
+    }
+
+    private fun loadEmojiGlyphs(): List<String> {
+        val fromAsset = try {
+            assets.open("categories/emoji.json").bufferedReader().use { it.readText() }
+                .let { JSONObject(it).optJSONArray("words") }
+                ?.let { arr -> (0 until arr.length()).map { arr.getJSONObject(it).optString("w", "") } }
+                ?.filter { it.isNotEmpty() }
+                ?.distinct()
+                ?: emptyList()
+        } catch (e: Exception) {
+            reportGestureError("Emoji pack unreadable: ${e.message}")
+            emptyList()
+        }
+        if (fromAsset.isNotEmpty()) return fromAsset
+        return liveCandidates.toList()
+    }
+
     /**
      * QWERTY encoder: raw committed letters feed [refreshQwertySuggestions]
      * (ONE `suggestQwerty` FFI per keystroke: literal + letter-graph
@@ -1249,6 +1529,12 @@ class KbInputMethodService : InputMethodService() {
             reportGestureError("Clipboard hidden while incognito — nothing saved")
             return
         }
+        if (!FriendDefaults.clipboardEnabled(this)) {
+            // Friend-default OFF (plan/24 §9): nothing is captured while
+            // off, so the panel would be empty — say where to enable.
+            reportGestureError("Clipboard history is OFF — enable in Settings → Appearance")
+            return
+        }
         clipboardPanelVisible = !clipboardPanelVisible
     }
 
@@ -1258,6 +1544,12 @@ class KbInputMethodService : InputMethodService() {
 
     /** Swept reload of the visible list (startup + incognito exit). */
     private fun reloadClipboardVisible() {
+        // Friend-default OFF (plan/24 §9): the persisted store is left
+        // untouched, but nothing loads while history is disabled.
+        if (!FriendDefaults.clipboardEnabled(this)) {
+            liveClipboard = emptyList()
+            return
+        }
         liveClipboard = try {
             ClipboardStore.load(this)
         } catch (e: Exception) {
@@ -1282,9 +1574,11 @@ class KbInputMethodService : InputMethodService() {
      * Captures IME-committed plaintext ([SnippetGates.mayCaptureClipboard]
      * first — password/incognito sessions never store, never show).
      * Pastes are raw commits, so captured text can never loop back
-     * through the learn path.
+     * through the learn path. Friend-default OFF ([FriendDefaults]) skips
+     * capture entirely — history must be explicitly enabled first.
      */
     private fun captureOwnCommit(text: String) {
+        if (!FriendDefaults.clipboardEnabled(this)) return
         if (!SnippetGates.mayCaptureClipboard(isPasswordField, isIncognito || manualIncognito)) return
         try {
             val now = System.currentTimeMillis()
@@ -1319,6 +1613,7 @@ class KbInputMethodService : InputMethodService() {
 
     private fun captureSystemClipboard(cm: ClipboardManager) {
         if (!keyboardActive) return
+        if (!FriendDefaults.clipboardEnabled(this)) return
         if (!SnippetGates.mayCaptureClipboard(isPasswordField, isIncognito || manualIncognito)) return
         try {
             val text = cm.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()
@@ -1343,6 +1638,7 @@ class KbInputMethodService : InputMethodService() {
      * is unreachable while incognito-effective).
      */
     internal fun pasteClipboardItem(item: ClipboardItem) {
+        clearToolbarRedo()
         val ic = currentInputConnection ?: run {
             reportGestureError("Paste failed: no input connection")
             return
@@ -1451,6 +1747,7 @@ class KbInputMethodService : InputMethodService() {
             reportGestureError("Snippet expand failed: no input connection")
             return
         }
+        clearToolbarRedo()
         try {
             ic.finishComposingText()
             ic.commitText(item.body, 1)
@@ -1596,6 +1893,7 @@ class KbInputMethodService : InputMethodService() {
 
     /** Commits raw text: no prediction state, no learning (symbols/digits). */
     private fun commitRaw(text: String) {
+        clearToolbarRedo()
         seq.clear()
         qwertyBuffer.clear()
         liveCandidates = emptyList()
@@ -1608,6 +1906,7 @@ class KbInputMethodService : InputMethodService() {
 
     /** Wired to pad ⌫ keys (all pad sizes + QWERTY bottom row). */
     internal fun deleteLast() {
+        clearToolbarRedo()
         val ic = currentInputConnection ?: return
         if (seq.isNotEmpty()) {
             seq.deleteCharAt(seq.length - 1)
@@ -1826,6 +2125,62 @@ class KbInputMethodService : InputMethodService() {
     }
 
     /**
+     * Slim-toolbar ↩: delete the last word ([deleteWords](1)) inside a
+     * batch edit, then stash the deleted span for ↪. When nothing is
+     * deleted (empty field / [deleteWords] no-op) the stash is left
+     * untouched so ↪ keeps restoring the previous stash, if any.
+     */
+    internal fun toolbarUndo() {
+        val ic = currentInputConnection ?: run {
+            reportGestureError("Undo failed: no input connection")
+            return
+        }
+        try {
+            ic.beginBatchEdit()
+        } catch (_: Exception) {
+        }
+        try {
+            deleteWords(1)
+        } finally {
+            try {
+                ic.endBatchEdit()
+            } catch (_: Exception) {
+            }
+        }
+        // deleteWords arms the fling UndoBar (undoText); mirror it into
+        // the single-level redo stash only when something was deleted.
+        if (undoAvailable && undoText.isNotEmpty()) {
+            toolbarRedoText = undoText
+            toolbarRedoAvailable = true
+            gestureLog.record("toolbar", "undo", "delete-last-word", undoText)
+        }
+    }
+
+    /**
+     * Slim-toolbar ↪: re-commit the word stashed by the last [toolbarUndo].
+     * Disabled (via [toolbarRedoAvailable]) when the stash is empty;
+     * a stray tap then names the cause on the status line instead of
+     * silently no-op'ing.
+     */
+    internal fun toolbarRedo() {
+        if (!toolbarRedoAvailable || toolbarRedoText.isEmpty()) {
+            reportGestureError("Nothing to redo")
+            return
+        }
+        val text = toolbarRedoText
+        toolbarRedoText = ""
+        toolbarRedoAvailable = false
+        commitText(text)
+        gestureLog.record("toolbar", "redo", "re-commit", text)
+    }
+
+    /** Fresh edits invalidate the single-level toolbar redo stash. */
+    private fun clearToolbarRedo() {
+        toolbarRedoText = ""
+        toolbarRedoAvailable = false
+    }
+
+    /**
      * Fling `↑` (policy-driven):
      * - numbers → commit `0` (the Space/0 position on a digit pad);
      * - js/rust/html/math → commit top + space or `;` (Gesture Tuning);
@@ -1959,7 +2314,7 @@ class KbInputMethodService : InputMethodService() {
     internal fun onCategoryChanged(tabLabel: String) {
         activeAssetId = canonicalTabId(tabLabel)
         // Snippet buffer dies on tab switch (plan 12:62): helpers belong to
-        // one tab's document scratch — switching to General hides the js strip,
+        // one tab's document scratch — switching to E hides the js strip,
         // and coming back later finds it gone. The new tab's static palette
         // (html/math) appears via the refresh at the end of this function.
         snippetBuffer.clear()
@@ -1992,13 +2347,23 @@ class KbInputMethodService : InputMethodService() {
         // New tab's static palette (html skeletons, math flat tokens) shows
         // immediately; buffer follow-tokens are gone (cleared above).
         refreshSnippetStrip()
+        // Spacebar language label follows the tab without rebuilding the pad.
+        val spaceLabel = CategoryLabels.spaceLabel(activeAssetId)
+        (cachedInputView as? LinearLayout)?.let { root ->
+            for (i in 0 until root.childCount) {
+                when (val child = root.getChildAt(i)) {
+                    is PadView -> child.setSpaceLabel(spaceLabel)
+                    is QwertyView -> child.setSpaceLabel(spaceLabel)
+                }
+            }
+        }
     }
 
     /**
-     * Canonical asset id for a tab label. The tab strip shows UI labels
-     * ([CategoryLabels]: `words` renders as "General"); the legacy display
-     * labels `EN`/`NE` still map. Shared by tap select and long-press
-     * placement so both resolve identically.
+     * Canonical asset id for a tab badge. The tab strip shows compact
+     * badges ([CategoryLabels]: `words` renders as `E`, `emoji` as `😀`);
+     * the legacy display labels (`General`, `EN`/`NE`) still map. Shared
+     * by tap select and long-press placement so both resolve identically.
      */
     internal fun canonicalTabId(tabLabel: String): String = CategoryLabels.canonicalId(tabLabel)
 
@@ -2241,6 +2606,7 @@ class KbInputMethodService : InputMethodService() {
             onDelete = { deleteLast() }
             onEnter = { onQwertyEnter() }
             onSwitchIme = { switchToNextIme() }
+            onSwitchImePicker = { showImePicker() }
             // Plan/01 amendment: the only QWERTY gesture (→) rides the
             // authoritative space path (confidence + lastAuto), never a
             // separate commit-top.
@@ -2248,6 +2614,7 @@ class KbInputMethodService : InputMethodService() {
             onGestureRejected = { reason -> gestureLog.record("qwerty", "fling", "rejected", reason) }
             gesturesEnabled = flingsAllowedAT
             updateThresholds(effectiveThresholds())
+            setSpaceLabel(CategoryLabels.spaceLabel(activeAssetId))
         }
     } else {
         padViewFor(this, activeLayoutId).apply {
@@ -2258,6 +2625,7 @@ class KbInputMethodService : InputMethodService() {
             onEnter = { handleEnter() }
             onControl = { code -> onPadControl(code) }
             onSwitchIme = { switchToNextIme() }
+            onSwitchImePicker = { showImePicker() }
             onFlingDelete = { words -> onPadFlingDelete(words) }
             onDeleteSlide = { words -> onDeleteSlidePreview(words) }
             onFlingSpace = { onPadFlingSpace() }
@@ -2268,6 +2636,7 @@ class KbInputMethodService : InputMethodService() {
             gesturesEnabled = flingsAllowedAT
             flingGate = gateFor(gesturePolicy())
             updateThresholds(effectiveThresholds())
+            setSpaceLabel(CategoryLabels.spaceLabel(activeAssetId))
         }
     }
 
@@ -2279,6 +2648,14 @@ class KbInputMethodService : InputMethodService() {
             val replacement = makePad()
             replacement.tag = "pad"
             root.addView(replacement, index)
+        } else {
+            // Pad unchanged (same layout): still re-tint for theme changes.
+            for (i in 0 until root.childCount) {
+                when (val child = root.getChildAt(i)) {
+                    is PadView -> child.refreshKeyTheme()
+                    is QwertyView -> child.refreshKeyTheme()
+                }
+            }
         }
     }
 
