@@ -1103,4 +1103,50 @@ mod tests {
         assert!(p.try_add_user_pack("names", "", "ava 100\n", "en", 50).is_err());
         assert!(p.try_add_user_pack("names", "Names", "", "en", 50).is_err());
     }
+
+    #[test]
+    fn hot_path_pure_ram_db_never_on_read_path() {
+        // Plan/06 + plan/14 core contract: the in-RAM dict is the source of
+        // truth for suggest; SQLite is durability only. Typing works fully
+        // with no store open, and opening + flushing the DB afterwards must
+        // not move a single result bit.
+        let p = Predictor::new(
+            r#"[{"w":"hello","freq":900,"cat":"EN"},{"w":"hell","freq":100,"cat":"EN"}]"#
+                .to_string(),
+        );
+        let run = || -> Vec<(String, u64, String)> {
+            let mut out = Vec::new();
+            for (ctx, digits) in [("", "43556"), ("", "4355"), ("say", "43556"), ("", "222")] {
+                for s in p.suggest(ctx.to_string(), digits.to_string(), "EN".to_string(), 5) {
+                    out.push((s.word, s.score.to_bits(), s.seq));
+                }
+            }
+            out
+        };
+        let cold = run();
+        assert!(!cold.is_empty());
+        // Learn with no store open: promotes in RAM, persists nowhere.
+        p.learn("hellp".to_string(), "EN".to_string());
+        p.learn("hellp".to_string(), "EN".to_string());
+        let ram_only = run();
+        assert_ne!(cold, ram_only, "learn must promote in RAM with no DB open");
+        assert!(ram_only.iter().any(|(w, _, _)| w == "hellp"));
+        assert!(
+            p.try_flush().unwrap_err().contains("not opened"),
+            "with no store, nothing reached disk"
+        );
+        // Attach durability and flush: the read path must not move.
+        let dir = std::env::temp_dir().join("kbcore_predictor_pureram");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            p.open_persist(
+                dir.join("kb.sqlite").display().to_string(),
+                dir.join("sync").display().to_string()
+            ),
+            ""
+        );
+        p.try_flush().unwrap();
+        assert_eq!(run(), ram_only, "DB flush must not move the read path");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
