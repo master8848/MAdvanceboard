@@ -1,12 +1,14 @@
 package com.kb.app
 
 import android.widget.Toast
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -14,20 +16,26 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.kb.ime.ClipboardHistory
 import com.kb.ime.ClipboardStore
+import com.kb.ime.FriendDefaults
 
 /**
- * Settings → Clipboard (plan/11 §3): retention presets + custom hours,
- * clear (pins-aware). Pills never enter: pins exempt, clear-all asks.
+ * Settings → Clipboard (plan/11 §3, friend-default plan/24 §9): history
+ * ON/OFF + retention presets + custom hours, clear (pins-aware).
+ *
+ * Friend-default is OFF: while off nothing is captured and the retention
+ * rows below are inert (they apply when history is enabled). When ON,
+ * 24h is the recommended preset (one-sentence story: "one day, then
+ * gone — pins you keep explicitly").
  *
  * Retention applies on the next sweep (every keyboard start + every
  * capture re-sweeps, so no background worker): tightening 7d→24h drops
- * expired unpinned on next open, pins untouched. Wired into
- * [SettingsScreen] as `ClipboardSettingsSection()`.
+ * expired unpinned on next open, pins untouched.
  */
 @Composable
 fun ClipboardSettingsSection() {
@@ -44,10 +52,11 @@ fun ClipboardSettingsSection() {
     }
 
     var ttl by remember(savedTick) { mutableStateOf(readTtl()) }
+    var historyOn by remember { mutableStateOf(FriendDefaults.clipboardEnabled(context)) }
 
     fun presetLabel(h: Long): String = when (h) {
         1L -> "1h"
-        24L -> "24h"
+        24L -> "24h ★ friend default"
         168L -> "7d"
         720L -> "30d"
         else -> "${h}h"
@@ -89,6 +98,29 @@ fun ClipboardSettingsSection() {
     )
     error?.let {
         Text(it, color = MaterialTheme.colorScheme.error)
+    }
+
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Clipboard history")
+            Text(
+                "OFF = nothing captured (friend default).",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Switch(
+            checked = historyOn,
+            onCheckedChange = {
+                try {
+                    FriendDefaults.setClipboardEnabled(context, it)
+                    historyOn = it
+                    error = null
+                } catch (e: Exception) {
+                    error = "Save failed: ${e.message}"
+                }
+            }
+        )
     }
 
     Text(
