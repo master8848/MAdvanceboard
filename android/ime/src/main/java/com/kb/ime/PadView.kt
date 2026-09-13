@@ -53,6 +53,12 @@ open class PadView @JvmOverloads constructor(
     var onEnter: () -> Unit = {}
     var onControl: (String) -> Unit = {}
     var onSwitchIme: () -> Unit = {}
+    /**
+     * Long-press on the 🌐 key: system IME picker (multi-IME / multi-globe
+     * menu). Tap still flips to the next IME via [onSwitchIme]; both are
+     * full-alpha — the globe is never dimmed under other keys.
+     */
+    var onSwitchImePicker: () -> Unit = {}
 
     // -- Plan 01 gesture outputs (wired by the host service). --
     /** Short fling ←, or continued-slide release: delete N words (N>=1). */
@@ -101,28 +107,100 @@ open class PadView @JvmOverloads constructor(
 
     fun updateThresholds(t: GestureThresholds) = gestures.updateThresholds(t)
 
+    /** (role, button) pairs for theme re-tinting without reinstall. */
+    private val keyButtons = mutableListOf<Pair<Boolean, Button>>()
+    /** Space-role buttons (language label) + enter buttons (accent re-tint). */
+    private val spaceButtons = mutableListOf<Button>()
+    private val enterButtons = mutableListOf<Button>()
+
+    /**
+     * Re-applies night-mode key tints (see [applyKeyTheme]). Called from the
+     * host on start-input-view so a Settings → Appearance change applies to
+     * the live keyboard.
+     */
+    fun refreshKeyTheme() = applyKeyTheme()
+
+    /**
+     * Centered spacebar language label (`English` / `नेपाली` per tab).
+     * Called by the host on tab switch; the tap action stays space.
+     */
+    fun setSpaceLabel(label: String) {
+        for (btn in spaceButtons) btn.text = label
+    }
+
+    /**
+     * Dark-aware key tints. Text keys follow [styleKeyButton]; functional
+     * keys keep their distinct container tint via [styleFunctionalKey];
+     * enter alone gets the circular pink accent ([styleEnterKey]).
+     */
+    private fun applyKeyTheme() {
+        val enterSet = enterButtons.toSet()
+        for ((functional, btn) in keyButtons) {
+            when {
+                btn in enterSet -> styleEnterKey(btn, context)
+                !functional -> styleKeyButton(btn, context)
+                else -> styleFunctionalKey(btn, context)
+            }
+        }
+    }
+
     init {
         rowCount = spec.rows
         columnCount = spec.cols
-        val pad = (PAD_PADDING_DP * resources.displayMetrics.density).toInt()
-        setPadding(pad)
-        val minTarget = (MIN_KEY_TARGET_DP * resources.displayMetrics.density).toInt()
+        useDefaultMargins = false
+        val density = resources.displayMetrics.density
+        val pad = (PAD_PADDING_DP * density).toInt()
+        val bottomExtra = (PAD_BOTTOM_MARGIN_DP * density).toInt()
+        setPadding(pad, pad, pad, pad + bottomExtra)
+        clipToPadding = false
+        val minTarget = (MIN_KEY_TARGET_DP * density).toInt()
+        // Compact fixed height (Gboard-style ~50dp); the 48dp floor stays
+        // via minimumWidth/minimumHeight so accessibility never regresses.
+        val keyHeight = (KEY_HEIGHT_DP * density).toInt()
+        val hGap = (KEY_H_GAP_DP * density).toInt()
+        val vGap = (KEY_V_GAP_DP * density).toInt()
         for (key in spec.keys) {
+            // Functional keys (space/delete/sym/control/enter/globe) get a
+            // distinct container tint vs letter keys — a "sym" key must never
+            // be mistaken for an s/y/m letter key. All keys render full
+            // alpha: nothing sits dimmed "under opacity".
+            val functional = key.role != PadRoles.TEXT
             val btn = Button(context).apply {
                 text = key.label.ifEmpty { key.code }
                 gravity = Gravity.CENTER
+                textSize = 15f
                 minimumWidth = minTarget
                 minimumHeight = minTarget
+                alpha = 1f
+                if (functional) {
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                }
                 setOnClickListener { dispatch(key) }
+                if (key.role == PadRoles.GLOBE) {
+                    setOnLongClickListener { onSwitchImePicker(); true }
+                }
             }
+            when {
+                key.role == PadRoles.ENTER -> {
+                    styleEnterKey(btn, context)
+                    enterButtons.add(btn)
+                }
+                !functional -> styleKeyButton(btn, context)
+                else -> styleFunctionalKey(btn, context)
+            }
+            if (key.role == PadRoles.SPACE) spaceButtons.add(btn)
+            keyButtons.add(functional to btn)
             val params = LayoutParams(
                 GridLayout.spec(key.row, 1f),
                 GridLayout.spec(key.col, 1f)
             ).apply {
                 width = 0
+                height = keyHeight
+                setMargins(hGap, vGap, hGap, vGap)
             }
             addView(btn, params)
         }
+        applyKeyTheme()
     }
 
     private fun dispatch(key: LayoutKeyUi) {
