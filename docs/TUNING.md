@@ -33,11 +33,15 @@ Tie-break: shorter word → lexicographic → pack priority. Lookup unions
 the stack (base prio `0` < extensions `10–90` < personal `100`), dedupes
 on `(norm(word), lang)`, caps at 200 matches, heaps top-30.
 
-## 3. Per-user tuning settings
+## 3. Tuning settings (what the UI actually exposes)
 
-Settings → Tuning exposes each weight as a slider (`0.0–3.0`, step
-`0.1`), plus: hide-threshold (default `-0.5`), neighbor on/off, bigram
-on/off. Reset-to-defaults button restores the table above.
+Settings → Advanced → Tuning exposes five gesture-detection sliders
+(fling distance / velocity / axis ratio / word step / long-press) — the
+ranking weights in the table above are engine reference values
+(`rank::RankWeights::default()`), not per-user sliders. Weight changes
+ride the grid-search spike (`docs/SPIKES.md` #1), not hand-tuning.
+Settings → Advanced → Reset restores board/layout defaults (global
+layout, per-tab overrides, QWERTY-first, code tabs hidden).
 
 ## 4. Thresholds
 

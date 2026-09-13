@@ -31,18 +31,18 @@ thoughtful gestures (`01`). Fix wording once, keep it fixed.
 
 ## 3. Concrete edits (checklist)
 
-- [ ] `README.md:1-4` title + lede → configurable framing.
-- [ ] `README.md:18-19` What-line + `124` License line → drop “9-key” noun.
-- [ ] `docs/OVERVIEW.md:3-6` What/Why → same framing, 2 lines.
-- [ ] `docs/INTENT.md:1` title, `:7` research bet, `:38` NOT-list
+- [x] `README.md:1-4` title + lede → configurable framing.
+- [x] `README.md:18-19` What-line + `124` License line → drop “9-key” noun.
+- [x] `docs/OVERVIEW.md:3-6` What/Why → same framing, 2 lines.
+- [x] `docs/INTENT.md:1` title, `:7` research bet, `:38` NOT-list
   (voice → gesture-typing only), `:68/:70` MVP (9/12-key) vs V2 (voice `15`).
-- [ ] `docs/USER.md:3` “How 9-key typing works” → “How pad typing works
+- [x] `docs/USER.md:3` “How 9-key typing works” → “How pad typing works
   (9-key default, layout per category)”.
-- [ ] `docs/ENGINEERING.md:10` mapping line → layout registry pointer.
-- [ ] `core-rust/README.md:1`, `lib.rs:1`, `mapping.rs:1`, `Cargo.toml:5`,
+- [x] `docs/ENGINEERING.md:10` mapping line → layout registry pointer.
+- [x] `core-rust/README.md:1`, `lib.rs:1`, `mapping.rs:1`, `Cargo.toml:5`,
   `android/README.md:3/10`, `packs/README.md:8` → “layout-driven engine,
   t9-9 default” phrasing.
-- [ ] `just docs-check` passes (fence balance + link surface).
+- [x] `just docs-check` passes (fence balance + link surface).
 
 ## 4. Acceptance
 

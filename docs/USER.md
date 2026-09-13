@@ -72,8 +72,10 @@ is this word suggested?".
   `{del: true}`: hidden everywhere, exempt from LRU eviction and cap,
   kept locally (single-device scope, no cross-device merge), removed
   only by explicit unblock.
-- **Forget (unblock):** Settings → Personal dictionary → search word →
-  Remove block.
+- **Forget (unblock):** no Settings UI yet — blocked words stay hidden
+  until a personal-dictionary manager lands (deferred). Reject signals
+  still decay automatically over 30 d, so mistyped-then-deleted words
+  recover on their own.
 - Reject signal is automatic too: deleting a committed word within 5 s or
   picking another candidate increments `rej` (decayed over 30 d).
 
