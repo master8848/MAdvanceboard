@@ -78,7 +78,7 @@ class CustomPacksTest {
     fun resolveTabsPinsPersonalLastAndHidesDisabled() {
         // Enabled customs appear before pinned ★personal.
         assertEquals(
-            listOf("numbers", "words", "ne", "js", "rust", "html", "emoji", "math", "names", "★personal"),
+            listOf("numbers", "words", "ne", "js", "rust", "html", "emoji", "math", "medical", "names", "★personal"),
             CustomPackValidation.resolveTabs(listOf("names"))
         )
         // Disable hides the tab: a disabled id is simply not passed in.
