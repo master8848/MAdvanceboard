@@ -12,6 +12,7 @@ pub mod session;
 pub mod snippet;
 pub mod stack;
 pub mod store;
+pub mod temporal;
 pub mod gates;
 
 pub use layout::{KeyMapping, LayoutRegistry, LayoutSpec, DEFAULT_LAYOUT_ID};

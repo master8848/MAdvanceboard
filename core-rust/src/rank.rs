@@ -8,6 +8,7 @@
 //!      + 0.3*CategoryBoost(w)
 //!      + 0.2*KeyFit(seq, w)
 //!      - 1.5*RejectPenalty(w)
+//!      + w_temporal*Temporal(w, bucket)   (plan 13 P1, default 0.0 dormant)
 //! ```
 //! Tie-break: shorter word, then lexicographic, then pack priority.
 
@@ -20,6 +21,10 @@
 /// kept: `w_base`/`w_reject`/`hide_threshold` showed ~zero elasticity,
 /// `w_keyfit` increases HURT both splits (−0.025 train / −0.019 held at 2.0),
 /// `w_bigram` is a no-op on ctx="" arms by construction.
+/// `w_temporal` (plan `13` P1) defaults **0.0 = dormant**: the
+/// `context_counts` table ships and records, but scores stay byte-identical
+/// until the 14-day morning-lift falsification (≥3pts) promotes an explicit
+/// non-zero value — the kill rule drops the term, never a migration.
 #[derive(Clone, Debug)]
 pub struct RankWeights {
     pub w_base: f64,
@@ -29,6 +34,8 @@ pub struct RankWeights {
     pub w_cat: f64,
     pub w_keyfit: f64,
     pub w_reject: f64,
+    /// P1 time-bucketed boost weight (plan `13`): `0.0` dormant by default.
+    pub w_temporal: f64,
     /// Candidates with `S < hide_threshold` are hidden unless expand-all.
     pub hide_threshold: f64,
 }
@@ -43,6 +50,7 @@ impl Default for RankWeights {
             w_cat: 1.5,
             w_keyfit: 0.2,
             w_reject: 1.5,
+            w_temporal: 0.0,
             hide_threshold: -0.5,
         }
     }
@@ -101,6 +109,19 @@ pub fn bigram_term(count_prev_word: u64, count_prev: u64, vocab: u64) -> f64 {
     ((count_prev_word + 1) as f64).log10() - ((count_prev + v) as f64).log10()
 }
 
+/// P1 time-bucketed boost (plan `13`): `log10(count + 1)` over the
+/// `context_counts(word, bucket)` accepts in the current bucket. Zero for
+/// unseen words (novelty is never penalized), `log` so a hot routine lifts
+/// without drowning the static + personal terms. Scaled by
+/// [`RankWeights::w_temporal`] (default `0.0` = dormant).
+pub fn temporal_term(bucket_count: u16) -> f64 {
+    if bucket_count == 0 {
+        0.0
+    } else {
+        ((u32::from(bucket_count) + 1) as f64).log10()
+    }
+}
+
 /// Inputs for scoring one candidate.
 #[derive(Clone, Debug, Default)]
 pub struct RankInput {
@@ -119,6 +140,10 @@ pub struct RankInput {
     pub keyfit: f64,
     pub accepts: u64,
     pub rejects: u64,
+    /// P1 temporal boost input ([`temporal_term`] of the bucket count).
+    /// Default `0.0` (no temporal data) — with the dormant default weight
+    /// the score is unchanged.
+    pub temporal: f64,
 }
 
 /// Full score `S(w)`.
@@ -139,6 +164,7 @@ pub fn score_candidate_with_base(input: &RankInput, w: &RankWeights, base: f64) 
         + w.w_cat * input.cat_boost
         + w.w_keyfit * input.keyfit
         - w.w_reject * reject_term(input.accepts, input.rejects)
+        + w.w_temporal * input.temporal
 }
 
 #[cfg(test)]
@@ -250,5 +276,31 @@ mod tests {
             let err = (dequantize_base(q) - base_term(f, 0)).abs();
             assert!(err <= 0.0005 + 1e-12, "freq {f}: err {err}");
         }
+    }
+
+    #[test]
+    fn temporal_dormant_by_default_active_when_weighted() {
+        // Plan 13 P1: default w_temporal = 0.0 keeps every existing score
+        // byte-identical (gate numbers cannot move); an explicit weight
+        // lifts bucket-learned words and never penalizes unseen ones.
+        let w = RankWeights::default();
+        assert_eq!(w.w_temporal, 0.0, "temporal ships dormant");
+        let mut input = base_input();
+        input.temporal = temporal_term(10);
+        assert_eq!(
+            score_candidate(&input, &w),
+            score_candidate(&base_input(), &w),
+            "dormant weight must ignore temporal input exactly"
+        );
+        let active = RankWeights {
+            w_temporal: 1.0,
+            ..Default::default()
+        };
+        assert!(score_candidate(&input, &active) > score_candidate(&base_input(), &active));
+        // temporal_term shape: zero at 0, monotone, log-bounded.
+        assert_eq!(temporal_term(0), 0.0);
+        assert!(temporal_term(1) > 0.0);
+        assert!(temporal_term(100) > temporal_term(10));
+        assert!(temporal_term(u16::MAX) < 5.0);
     }
 }
