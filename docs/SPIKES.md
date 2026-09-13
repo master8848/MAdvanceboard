@@ -1,5 +1,15 @@
 # Research Spikes — Phase 4 notes (plan/09)
 
+## 0. Voice V1 — no spike needed (decision recorded, plan/15)
+
+- Voice V1 is system-`SpeechRecognizer`-first with zero audio retention;
+  the custom-API engine (`AudioRecord` + `INTERNET` + key storage + spill
+  lifecycle) is deferred per plan/24 alternatives. No falsifiable unknown
+  justifies a time-box here — policy contract (`VoiceInputPolicy`) is
+  unit-covered; the remaining risk is service-wiring + device behavior,
+  which is build/test work, not research. Blocks: nothing (friend-ready
+  #6 tracks the wiring follow-up).
+
 Time-boxed, falsifiable, never blocking. Each spike ends with a verdict
 that feeds back into its owner tier; a spike that fails to reach a
 verdict in its box is recorded as INCONCLUSIVE (box kept, question

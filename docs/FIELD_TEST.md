@@ -1,7 +1,7 @@
 # Field Test Checklist — WhatsApp / Viber / Messenger (plan/24)
 
-Run on a mid-range minSdk-26-class device, release (minified) build,
-before inviting anyone. Zero crashes is the bar; everything else is
+Status: **NOT-RUN** — no device run claimed. Run on a mid-range
+minSdk-26-class device, release (minified) build, before inviting anyone. Zero crashes is the bar; everything else is
 notes for the next Tier-2 pass.
 
 ## Per app (WhatsApp, Viber, Messenger)
@@ -23,8 +23,10 @@ notes for the next Tier-2 pass.
   → copy in-app → paste works → 24h preset marked ★.
 - [ ] Rotate / background / kill-and-return mid-word: no crash, no
   leaked composing text in the next field.
-- [ ] Voice (when `15` lands): airplane-mode retry without re-speak;
-  zero residue after close.
+- [ ] Voice (gated on friend-ready #6 — currently BLOCKED, service
+  wiring not built): airplane-mode retry without re-speak (offline retry
+  reuses kept text per `VoiceInputPolicyTest`); zero residue after close
+  (`close()` wipe + `cacheDir` sweep on-device, none claimed yet).
 
 ## Stability + power
 

@@ -15,7 +15,7 @@
 - Screenshots: EN board + NE board + emoji picker + suggestion strip
   (4 minimum, phone).
 - Descriptions EN (+NE translation): one paragraph — configurable pad
-  (9-key default), offline prediction, EN/NE tabs, no network permission.
+  (QWERTY default, 9-key opt-in), offline prediction, EN/NE tabs, no network permission.
 - Content rating questionnaire (everyone; no user-generated-content
   exchange, no network).
 - Crash-report opt-in note in the listing ("anonymous crash reports only,

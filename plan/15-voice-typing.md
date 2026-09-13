@@ -1,6 +1,9 @@
 # 15 — Voice Typing (System Engine Default + Optional API Engine, No Re-Speak)
 
-Plan only, no code. Mic is an action (like `01`), not typing. Same privacy as keys.
+Status: policy contract CODE-DONE (`VoiceInputPolicy` + `VoiceInputPolicyTest`,
+pure JVM, no `android.speech` imports); `SpeechRecognizer` service wiring
+follow-up NOT BUILT (create/listener/destroy, permission via settings
+Activity, device run). Plan below is the wiring spec.
 
 ## 1. Engine choice (what Gboard uses, best-practice pattern)
 
