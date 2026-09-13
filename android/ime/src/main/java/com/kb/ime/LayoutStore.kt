@@ -38,6 +38,7 @@ object LayoutStore {
         "html" to "html",
         "emoji" to "emoji",
         "math" to "math",
+        "medical" to "⚕",
         "personal" to "★personal"
     )
 
