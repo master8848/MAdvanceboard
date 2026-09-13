@@ -139,6 +139,13 @@ class KbInputMethodService : InputMethodService() {
      * (password/URI force the literal) is automatic, not a setting.
      */
     internal var correctionMode: CorrectionMode = CorrectionMode.STANDARD
+    /**
+     * Roman-commit toggle (plan/23 Step 4). Default OFF = NE commits
+     * Devanagari only (friends self-select; see plan/23). The UI toggle
+     * belongs to plan/19-20; this flag is the single read site.
+     */
+    internal var romanCommitEnabled: Boolean = false
+
     /** Active category as canonical asset id (`words`, `ne`, …).
      * Legacy display labels `EN`/`NE` still map (compat); consults manifest learn flags. */
     private var activeAssetId: String = "words"
@@ -224,6 +231,14 @@ class KbInputMethodService : InputMethodService() {
 
     /** Service-scoped scope for suggest/learn; cancelled in [onDestroy]. */
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /**
+     * FIFO commit scope for Roman-toggle commits (plan/23 Step 4):
+     * single-parallelism so rapid commits resolve + apply in order.
+     * Cancelled in [onDestroy] with [serviceScope].
+     */
+    private val romanCommitScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
 
     /**
      * Lifecycle owner for the [ComposeView] strip. `InputMethodService`
@@ -689,6 +704,7 @@ class KbInputMethodService : InputMethodService() {
 
     override fun onDestroy() {
         serviceScope.cancel()
+        romanCommitScope.cancel()
         imeLifecycleOwner.handle(Lifecycle.Event.ON_DESTROY)
         try {
             (getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager)
@@ -1502,6 +1518,27 @@ class KbInputMethodService : InputMethodService() {
         clearAuto: Boolean = true,
         romanResolved: Boolean = false
     ) {
+        // Roman-commit toggle (plan/23 Step 4, default OFF = Devanagari):
+        // on the NE tab, resolve the pack `tr` form off-thread, then
+        // commit IN ORDER via the FIFO scope (rapid taps can't swap).
+        // Toggle-off, non-NE, and already-resolved takes the sync path
+        // below untouched. Raw paths (emoji/symbols/digits) never enter
+        // here — only word commits.
+        if (!romanResolved && romanCommitEnabled && activeAssetId.equals("ne", ignoreCase = true)) {
+            clearToolbarRedo()
+            val p = predictor
+            romanCommitScope.launch {
+                val form = try {
+                    p?.romanForm(word)?.takeIf { it.isNotEmpty() } ?: word
+                } catch (_: Exception) {
+                    word
+                }
+                mainHandler.post {
+                    commitCandidateWithTerminator(form, terminator, clearAuto, romanResolved = true)
+                }
+            }
+            return
+        }
         clearToolbarRedo()
         if (clearAuto) {
             lastAuto = null
