@@ -17,7 +17,9 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import kotlin.math.abs
@@ -30,12 +32,13 @@ import kotlin.math.abs
  * - fling `←` = cycle overflow: next page of 3 through the fetched list.
  * - tap `∨` / swipe-up = expand-all sheet (30, paged) — owned by [ImeScreen].
  * - swipe-DOWN = toggle pad 9-key ↔ QWERTY ([classifyModeSwitch]: the only
- *   free axis on the strip; duplicates the TalkBack QWERTY FAB, which stays
- *   authoritative). Vertical down was previously ignored — no gesture moves.
+ *   free axis on the strip; duplicates the TalkBack keyboard toggle, which
+ *   stays authoritative). Vertical down was previously ignored — no gesture moves.
  *
  * No delete here. Every gesture duplicates a visible control: candidates
- * are tappable, overflow shows a pager label, the expand-all button sits in
- * [CategoryTabs], and the QWERTY FAB sits beside this strip.
+ * are tappable, the expand-all button sits in [CategoryTabs], and the
+ * keyboard-icon toggle sits beside this strip. Overflow paging shows no
+ * numeric counter — fling ← simply cycles.
  */
 @Composable
 fun SuggestionStrip(
@@ -112,40 +115,38 @@ fun SuggestionStrip(
                 }
         ) {
             itemsIndexed(shown) { index, word ->
-                // Top suggestion leads in primary; the rest sit tonal.
-                // 12dp vertical padding keeps the ~48dp touch target.
-                val container = if (index == 0) {
-                    MaterialTheme.colorScheme.primaryContainer
-                } else {
-                    MaterialTheme.colorScheme.secondaryContainer
+                // Top suggestion leads brighter; the rest sit tonal.
+                // Dark theme uses muted key-grey slabs so the strip melts
+                // into the keyboard background; light keeps scheme colors.
+                // Compact 6dp vertical padding (Gboard-style strip).
+                val dark = ThemeStore.isDarkEffective(LocalContext.current)
+                val container = when {
+                    dark && index == 0 -> Color(0xFF3F3F47)
+                    dark -> Color(0xFF2E2E33)
+                    index == 0 -> MaterialTheme.colorScheme.primaryContainer
+                    else -> MaterialTheme.colorScheme.secondaryContainer
                 }
-                val content = if (index == 0) {
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                } else {
-                    MaterialTheme.colorScheme.onSecondaryContainer
+                val content = when {
+                    dark -> Color(0xFFE6E6E6)
+                    index == 0 -> MaterialTheme.colorScheme.onPrimaryContainer
+                    else -> MaterialTheme.colorScheme.onSecondaryContainer
                 }
                 Surface(
                     onClick = { onPick(word) },
                     shape = ExpressiveChipShape,
                     color = container,
                     tonalElevation = 1.dp,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)
+                    modifier = Modifier.padding(horizontal = 3.dp, vertical = 2.dp)
                 ) {
                     Text(
                         text = word,
                         color = content,
                         style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                     )
                 }
             }
         }
-        if (pageCount > 1) {
-            Text(
-                text = "… ${page + 1}/$pageCount — fling ← for more",
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
-        }
+        // No numeric pager label: overflow cycles silently via fling ←.
     }
 }
